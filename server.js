@@ -38,6 +38,44 @@ let bot = null;
 let botStatus = 'IDLE'; // IDLE, ACTIVE, OBSERVING_LIVE
 let totalMessagesProcessed = 0;
 
+// Chat Queue and Deduplication Variables
+class ChatQueue {
+  constructor() {
+    this.queues = new Map();
+    this.running = new Set();
+  }
+
+  enqueue(chatId, task) {
+    if (!this.queues.has(chatId)) {
+      this.queues.set(chatId, []);
+    }
+    this.queues.get(chatId).push(task);
+    this.processNext(chatId);
+  }
+
+  async processNext(chatId) {
+    if (this.running.has(chatId)) return;
+    const queue = this.queues.get(chatId);
+    if (!queue || queue.length === 0) return;
+
+    const task = queue.shift();
+    this.running.add(chatId);
+
+    try {
+      await task();
+    } catch (err) {
+      console.error(`Error executing task in chat ${chatId}:`, err);
+    } finally {
+      this.running.delete(chatId);
+      this.processNext(chatId);
+    }
+  }
+}
+
+const chatQueue = new ChatQueue();
+const processedUpdateIds = new Set();
+const processingUpdateIds = new Set();
+
 // Initialize System
 async function startSystem() {
   // 1. Database
@@ -97,61 +135,90 @@ function setupBotHandlers() {
   bot.on(['message:text', 'message:photo', 'message:document'], async (ctx) => {
     const message = ctx.message;
     const chatId = ctx.chat.id;
-    const text = message.text || message.caption || '';
-    
-    // Save all messages to short-term memory database (rolling buffer)
-    const msgRecord = {
-      telegram_message_id: message.message_id,
-      chat_id: chatId,
-      user_id: message.from.id,
-      username: message.from.username || '',
-      user_fullname: [message.from.first_name, message.from.last_name].filter(Boolean).join(' '),
-      content: text || '[Attachment]',
-      reply_to_message_id: message.reply_to_message?.message_id || null
-    };
-    
-    await addMessageToBuffer(msgRecord);
-    totalMessagesProcessed++;
+    const updateId = ctx.update.update_id;
 
-    // 1. Observation Mode check: if >100 messages in 10 minutes, set state to OBSERVING_LIVE
-    const recentMsgs = await getRecentMessageCount(chatId, 10);
-    if (recentMsgs >= 100 && botStatus !== 'OBSERVING_LIVE') {
-      botStatus = 'OBSERVING_LIVE';
-      await logSystem('OBSERVER', `High chat volume detected (${recentMsgs} msgs/10m). Switched to Observation Mode (Gemini 3 Flash Live session active).`);
-    } else if (recentMsgs < 50 && botStatus === 'OBSERVING_LIVE') {
-      botStatus = 'ACTIVE';
-      await logSystem('OBSERVER', `Chat volume normalized (${recentMsgs} msgs/10m). Exiting Observation Mode.`);
+    // Ignore bot's own messages
+    if (message.from?.id === ctx.me?.id) {
+      return;
     }
 
-    // 2. Classify Message
-    const category = classifyMessage(ctx);
-    if (category === 'IGNORE') {
-      return; // Do nothing
+    // Prevent duplicate processing of the same update
+    if (processedUpdateIds.has(updateId) || processingUpdateIds.has(updateId)) {
+      return;
     }
 
-    // 3. Process with Gemma Planner
-    await ctx.replyWithChatAction('typing');
-    const replyText = await runPlanner(ctx, category);
-    
-    if (replyText) {
-      // Send Reply back to group/user
-      const sentMessage = await ctx.reply(replyText, {
-        reply_parameters: { message_id: message.message_id }
-      });
-      await logSystem('SYSTEM', `Sent response to ${msgRecord.user_fullname}: "${replyText.substring(0, 50)}..."`);
-      
-      // Save bot's reply to short-term memory database (rolling buffer)
-      const botRecord = {
-        telegram_message_id: sentMessage.message_id,
-        chat_id: chatId,
-        user_id: ctx.me.id,
-        username: ctx.me.username || '',
-        user_fullname: ctx.me.first_name || 'Bot',
-        content: replyText,
-        reply_to_message_id: message.message_id
-      };
-      await addMessageToBuffer(botRecord);
-    }
+    processingUpdateIds.add(updateId);
+
+    chatQueue.enqueue(chatId, async () => {
+      try {
+        const text = message.text || message.caption || '';
+        
+        // Save all messages to short-term memory database (rolling buffer)
+        const msgRecord = {
+          telegram_message_id: message.message_id,
+          chat_id: chatId,
+          user_id: message.from.id,
+          username: message.from.username || '',
+          user_fullname: [message.from.first_name, message.from.last_name].filter(Boolean).join(' '),
+          content: text || '[Attachment]',
+          reply_to_message_id: message.reply_to_message?.message_id || null
+        };
+        
+        await addMessageToBuffer(msgRecord);
+        totalMessagesProcessed++;
+
+        // 1. Observation Mode check: if >100 messages in 10 minutes, set state to OBSERVING_LIVE
+        const recentMsgs = await getRecentMessageCount(chatId, 10);
+        if (recentMsgs >= 100 && botStatus !== 'OBSERVING_LIVE') {
+          botStatus = 'OBSERVING_LIVE';
+          await logSystem('OBSERVER', `High chat volume detected (${recentMsgs} msgs/10m). Switched to Observation Mode (Gemini 3 Flash Live session active).`);
+        } else if (recentMsgs < 50 && botStatus === 'OBSERVING_LIVE') {
+          botStatus = 'ACTIVE';
+          await logSystem('OBSERVER', `Chat volume normalized (${recentMsgs} msgs/10m). Exiting Observation Mode.`);
+        }
+
+        // 2. Classify Message
+        const category = classifyMessage(ctx);
+        if (category === 'IGNORE') {
+          return; // Do nothing
+        }
+
+        // 3. Process with Gemma Planner
+        await ctx.replyWithChatAction('typing');
+        const replyText = await runPlanner(ctx, category);
+        
+        if (replyText) {
+          // Send Reply back to group/user
+          const sentMessage = await ctx.reply(replyText, {
+            reply_parameters: { message_id: message.message_id }
+          });
+          await logSystem('SYSTEM', `Sent response to ${msgRecord.user_fullname}: "${replyText.substring(0, 50)}..."`);
+          
+          // Save bot's reply to short-term memory database (rolling buffer)
+          const botRecord = {
+            telegram_message_id: sentMessage.message_id,
+            chat_id: chatId,
+            user_id: ctx.me.id,
+            username: ctx.me.username || '',
+            user_fullname: ctx.me.first_name || 'Bot',
+            content: replyText,
+            reply_to_message_id: message.message_id
+          };
+          await addMessageToBuffer(botRecord);
+        }
+      } catch (err) {
+        await logSystem('SYSTEM', `Error processing queue task in chat ${chatId}: ${err.message}`);
+      } finally {
+        processingUpdateIds.delete(updateId);
+        processedUpdateIds.add(updateId);
+        
+        // Bounded size to prevent memory leaks
+        if (processedUpdateIds.size > 1000) {
+          const firstVal = processedUpdateIds.values().next().value;
+          processedUpdateIds.delete(firstVal);
+        }
+      }
+    });
   });
 
   // Error Handler

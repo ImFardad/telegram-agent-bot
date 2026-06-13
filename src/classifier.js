@@ -4,6 +4,11 @@ export function classifyMessage(ctx) {
   const message = ctx.message;
   if (!message) return 'IGNORE';
 
+  // Ignore bot's own messages
+  if (message.from?.id === ctx.me?.id) {
+    return 'IGNORE';
+  }
+
   const botUsername = ctx.me?.username || '';
   const text = message.text || message.caption || '';
   const isPrivate = ctx.chat.type === 'private';
