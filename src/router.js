@@ -27,7 +27,7 @@ function cleanErrorMessage(msg) {
 const FALLBACK_CHAINS = {
   GEMMA_PLANNER: ['gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemini-3.1-flash-lite'],
   GEMMA: ['gemma-4-26b-a4b-it', 'gemma-4-31b-it', 'gemini-3.1-flash-lite'],
-  LITE: ['gemini-3.1-flash-lite', 'gemma-4-26b-a4b-it', 'gemini-2.5-flash-lite'],
+  LITE: ['gemini-3.1-flash-lite', 'gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemma-4-31b-it'],
   FLASH: ['gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemma-4-31b-it', 'gemini-3-flash', 'gemini-2.5-flash'],
   LIVE_DIGEST: ['gemini-3-flash-live']
 };
@@ -405,15 +405,74 @@ export async function generateText({ tier, prompt, systemInstruction = '', histo
     // If it's an OpenRouter model identifier (contains a slash)
     const isOpenRouterModel = model.includes('/');
     
-    addTraceStep('ROUTER', 'pending', `Routing to model: ${model} (${isOpenRouterModel ? 'OpenRouter' : 'Google AI Studio'})`);
+    let attempts = 0;
+    const maxAttempts = 3;
+    let success = false;
+    let result;
 
-    try {
-      if (isOpenRouterModel) {
-        const orApiKey = process.env.OPENROUTER_API_KEY;
-        if (!orApiKey || orApiKey.startsWith('your_')) {
-          throw new Error('OpenRouter API key is missing or unconfigured.');
+    while (attempts < maxAttempts && !success) {
+      attempts++;
+      addTraceStep('ROUTER', 'pending', `Routing to model: ${model} (${isOpenRouterModel ? 'OpenRouter' : 'Google AI Studio'}) - Attempt ${attempts}/${maxAttempts}`);
+      
+      try {
+        if (isOpenRouterModel) {
+          const orApiKey = process.env.OPENROUTER_API_KEY;
+          if (!orApiKey || orApiKey.startsWith('your_')) {
+            throw new Error('OpenRouter API key is missing or unconfigured.');
+          }
+
+          const formattedMessages = [];
+          if (systemInstruction) {
+            formattedMessages.push({ role: 'system', content: systemInstruction });
+          }
+          for (const h of history) {
+            formattedMessages.push({ role: h.role, content: h.content });
+          }
+          formattedMessages.push({ role: 'user', content: prompt });
+
+          result = await callOpenRouterAPI(model, formattedMessages, orApiKey);
+          addTraceStep('ROUTER', 'success', `Successfully generated text via OpenRouter: ${model}`);
+          await incrementModelUsage(model);
+          success = true;
+        } else {
+          // Run via Google API pool
+          if (model === 'gemini-3-flash-live') {
+            result = await executeWithPool('LIVE', model, prompt, systemInstruction, grounding, jsonMode);
+          } else {
+            result = await executeWithPool('TEXT', model, geminiContents, systemInstruction, grounding, jsonMode);
+          }
+          addTraceStep('ROUTER', 'success', `Successfully generated text via Gemini: ${model}`);
+          await incrementModelUsage(model);
+          success = true;
         }
+      } catch (err) {
+        lastError = err;
+        await logSystem('ROUTER', `Model ${model} attempt ${attempts}/${maxAttempts} failed: ${err.message}`);
+        if (attempts < maxAttempts) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
+        }
+      }
+    }
 
+    if (success) {
+      return result;
+    } else {
+      await logSystem('ROUTER', `Model ${model} in tier ${tier} failed all ${maxAttempts} attempts. Trying next fallback.`);
+      addTraceStep('ROUTER', 'failed', `Model ${model} failed all ${maxAttempts} attempts: ${lastError.message.substring(0, 50)}...`);
+    }
+  }
+
+  // Final ultimate fallback to OpenRouter free llama model if all else fails
+  const orApiKey = process.env.OPENROUTER_API_KEY;
+  if (orApiKey && !orApiKey.startsWith('your_')) {
+    let attempts = 0;
+    const maxAttempts = 3;
+    const fallbackModel = 'meta-llama/llama-3-8b-instruct:free';
+    
+    while (attempts < maxAttempts) {
+      attempts++;
+      try {
+        addTraceStep('ROUTER', 'pending', `Ultimate fallback attempt ${attempts}/${maxAttempts}: routing to OpenRouter free model: ${fallbackModel}`);
         const formattedMessages = [];
         if (systemInstruction) {
           formattedMessages.push({ role: 'system', content: systemInstruction });
@@ -423,50 +482,17 @@ export async function generateText({ tier, prompt, systemInstruction = '', histo
         }
         formattedMessages.push({ role: 'user', content: prompt });
 
-        const result = await callOpenRouterAPI(model, formattedMessages, orApiKey);
-        addTraceStep('ROUTER', 'success', `Successfully generated text via OpenRouter: ${model}`);
-        await incrementModelUsage(model);
+        const result = await callOpenRouterAPI(fallbackModel, formattedMessages, orApiKey);
+        addTraceStep('ROUTER', 'success', `Ultimate fallback success using: ${fallbackModel}`);
+        await incrementModelUsage(fallbackModel);
         return result;
-      } else {
-        // Run via Google API pool
-        let result;
-        if (model === 'gemini-3-flash-live') {
-          result = await executeWithPool('LIVE', model, prompt, systemInstruction, grounding, jsonMode);
-        } else {
-          result = await executeWithPool('TEXT', model, geminiContents, systemInstruction, grounding, jsonMode);
+      } catch (fallbackErr) {
+        lastError = fallbackErr;
+        addTraceStep('ROUTER', 'failed', `Ultimate fallback attempt ${attempts}/${maxAttempts} failed: ${fallbackErr.message}`);
+        if (attempts < maxAttempts) {
+          await new Promise(resolve => setTimeout(resolve, 1000));
         }
-        addTraceStep('ROUTER', 'success', `Successfully generated text via Gemini: ${model}`);
-        await incrementModelUsage(model);
-        return result;
       }
-    } catch (err) {
-      lastError = err;
-      await logSystem('ROUTER', `Model ${model} in tier ${tier} failed: ${err.message}. Trying next fallback.`);
-      addTraceStep('ROUTER', 'failed', `Model ${model} failed: ${err.message.substring(0, 50)}...`);
-    }
-  }
-
-  // Final ultimate fallback to OpenRouter free llama model if all else fails
-  const orApiKey = process.env.OPENROUTER_API_KEY;
-  if (orApiKey && !orApiKey.startsWith('your_')) {
-    try {
-      const fallbackModel = 'meta-llama/llama-3-8b-instruct:free';
-      addTraceStep('ROUTER', 'pending', `Ultimate fallback: routing to OpenRouter free model: ${fallbackModel}`);
-      const formattedMessages = [];
-      if (systemInstruction) {
-        formattedMessages.push({ role: 'system', content: systemInstruction });
-      }
-      for (const h of history) {
-        formattedMessages.push({ role: h.role, content: h.content });
-      }
-      formattedMessages.push({ role: 'user', content: prompt });
-
-      const result = await callOpenRouterAPI(fallbackModel, formattedMessages, orApiKey);
-      addTraceStep('ROUTER', 'success', `Ultimate fallback success using: ${fallbackModel}`);
-      await incrementModelUsage(fallbackModel);
-      return result;
-    } catch (fallbackErr) {
-      addTraceStep('ROUTER', 'failed', `Ultimate fallback failed: ${fallbackErr.message}`);
     }
   }
 
