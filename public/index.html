@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Telegram Agent Control Panel</title>
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+  <!-- Remix Icons -->
+  <link href="https://cdn.jsdelivr.net/npm/remixicon@4.2.0/fonts/remixicon.css" rel="stylesheet"/>
+  <!-- Custom CSS -->
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <div class="app-container">
+    
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="logo-glow"></div>
+        <i class="ri-robot-3-line brand-icon"></i>
+        <span>Antigravity Social Bot</span>
+      </div>
+
+      <nav class="nav-menu">
+        <button class="nav-item active" data-tab="tab-overview">
+          <i class="ri-dashboard-fill"></i>
+          <span>Overview</span>
+        </button>
+        <button class="nav-item" data-tab="tab-memory">
+          <i class="ri-brain-line"></i>
+          <span>Long Memory</span>
+        </button>
+        <button class="nav-item" data-tab="tab-router">
+          <i class="ri-route-line"></i>
+          <span>Model Router</span>
+        </button>
+      </nav>
+
+      <div class="status-footer">
+        <div class="status-indicator">
+          <span class="indicator-dot active" id="indicator-dot"></span>
+          <span id="agent-status-text">System IDLE</span>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="main-content">
+      
+      <!-- Top header bar -->
+      <header class="top-bar">
+        <div class="page-title">
+          <h1 id="view-title">Dashboard Overview</h1>
+          <p id="view-subtitle">System metrics, real-time activity, and performance.</p>
+        </div>
+        <div class="system-time">
+          <i class="ri-time-line"></i>
+          <span id="live-time">00:00:00 UTC</span>
+        </div>
+      </header>
+
+      <!-- TAB 1: OVERVIEW -->
+      <section id="tab-overview" class="tab-pane active">
+        <!-- Metrics Grid -->
+        <div class="metrics-grid">
+          <div class="metric-card">
+            <div class="metric-icon bg-purple">
+              <i class="ri-shut-down-line"></i>
+            </div>
+            <div class="metric-data">
+              <span class="metric-label">Uptime</span>
+              <h3 class="metric-value" id="stat-uptime">0s</h3>
+            </div>
+          </div>
+          
+          <div class="metric-card">
+            <div class="metric-icon bg-blue">
+              <i class="ri-message-3-line"></i>
+            </div>
+            <div class="metric-data">
+              <span class="metric-label">Messages Logged</span>
+              <h3 class="metric-value" id="stat-messages">0</h3>
+            </div>
+          </div>
+
+          <div class="metric-card">
+            <div class="metric-icon bg-green">
+              <i class="ri-cpu-line"></i>
+            </div>
+            <div class="metric-data">
+              <span class="metric-label">Memory Allocation</span>
+              <h3 class="metric-value" id="stat-memory">0 MB</h3>
+            </div>
+          </div>
+
+          <div class="metric-card">
+            <div class="metric-icon bg-orange">
+              <i class="ri-server-line"></i>
+            </div>
+            <div class="metric-data">
+              <span class="metric-label">Platform Host</span>
+              <h3 class="metric-value" id="stat-platform">Linux</h3>
+            </div>
+          </div>
+        </div>
+
+        <!-- System Logs Console -->
+        <div class="console-section">
+          <div class="section-header">
+            <h2><i class="ri-terminal-box-line"></i> System Event Logs</h2>
+            <div class="actions">
+              <button class="btn btn-secondary btn-sm" id="btn-clear-logs">
+                <i class="ri-delete-bin-7-line"></i> Clear Logs
+              </button>
+              <button class="btn btn-primary btn-sm" id="btn-refresh-logs">
+                <i class="ri-refresh-line"></i> Refresh
+              </button>
+            </div>
+          </div>
+          <div class="console-wrapper">
+            <div class="console-body" id="log-console">
+              <!-- Logs dynamic generation -->
+              <div class="log-line system">[SYSTEM] Dashboard loaded. Awaiting database connection...</div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB 2: LONG MEMORY -->
+      <section id="tab-memory" class="tab-pane">
+        <div class="section-actions">
+          <div class="search-bar">
+            <i class="ri-search-2-line"></i>
+            <input type="text" id="user-search" placeholder="Search users, interests, facts...">
+          </div>
+        </div>
+
+        <!-- User Cards Container -->
+        <div class="user-cards-grid" id="user-cards-container">
+          <!-- Dynamically populated user profiles -->
+          <div class="card-loader">Loading user memories...</div>
+        </div>
+      </section>
+
+      <!-- TAB 3: MODEL ROUTER -->
+      <section id="tab-router" class="tab-pane">
+        <div class="registry-header-bar">
+          <div class="registry-info">
+            <h2>OpenRouter Free Models Registry</h2>
+            <p>Benchmarked and dynamically indexed every 24 hours.</p>
+          </div>
+          <button class="btn btn-primary" id="btn-trigger-discovery">
+            <i class="ri-radar-line"></i> Trigger Model Scan
+          </button>
+        </div>
+
+        <div class="models-table-wrapper">
+          <table class="models-table">
+            <thead>
+              <tr>
+                <th>Model ID</th>
+                <th>Context Length</th>
+                <th>Tool Use</th>
+                <th>Benchmark Latency</th>
+                <th>Reliability</th>
+                <th>Utility Score</th>
+              </tr>
+            </thead>
+            <tbody id="models-table-body">
+              <!-- Models rows dynamic generation -->
+              <tr>
+                <td colspan="6" class="table-empty">No models loaded. Run a manual scan.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+    </main>
+
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

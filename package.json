@@ -1,0 +1,19 @@
+{
+  "name": "telegram-agent-bot",
+  "version": "1.0.0",
+  "description": "Persistent Social Agent Bot for Telegram with Express Dashboard and SQLite Memory",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "grammy": "^1.23.0",
+    "sqlite3": "^5.1.7",
+    "sqlite": "^5.1.1",
+    "dotenv": "^16.4.5",
+    "cors": "^2.8.5"
+  }
+}
