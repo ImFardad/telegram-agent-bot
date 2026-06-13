@@ -14,7 +14,12 @@ export function classifyMessage(ctx) {
   const isDirectlyAddressed = isPrivate || isMentioned || isRepliedToBot;
 
   // 1. Check for Vision (Photos, Documents, Media)
-  const hasPhoto = !!(message.photo || message.document && message.document.mime_type?.startsWith('image/'));
+  const repliedMessage = message.reply_to_message;
+  const hasPhoto = !!(
+    message.photo || 
+    (message.document && message.document.mime_type?.startsWith('image/')) ||
+    (repliedMessage && (repliedMessage.photo || (repliedMessage.document && repliedMessage.document.mime_type?.startsWith('image/'))))
+  );
   if (hasPhoto) {
     if (isDirectlyAddressed) {
       logSystem('CLASSIFIER', 'Classified: VISION (Direct)');

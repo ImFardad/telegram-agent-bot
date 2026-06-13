@@ -13,12 +13,16 @@ import {
   getAllUserProfiles, 
   getRegisteredModels,
   addMessageToBuffer,
-  getRecentMessageCount
+  getRecentMessageCount,
+  getModelUsageStats
 } from './src/database.js';
 import { classifyMessage } from './src/classifier.js';
 import { runPlanner } from './src/planner.js';
 import { discoverFreeModels, startDiscoverySchedule } from './src/discovery.js';
-import { setBotInstance } from './src/tools.js';
+import { setBotInstance, webSearch } from './src/tools.js';
+import { getCurrentTrace } from './src/trace.js';
+import { getKeyStatus, generateText, checkKeysHealthOnStartup } from './src/router.js';
+import { runObserverDigest } from './src/observer.js';
 
 dotenv.config();
 
@@ -38,6 +42,9 @@ let totalMessagesProcessed = 0;
 async function startSystem() {
   // 1. Database
   await initDatabase();
+  
+  // 1b. Verify API Keys Health using Gemma 4 26B
+  await checkKeysHealthOnStartup();
   
   // 2. Telegram Bot
   const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -128,10 +135,22 @@ function setupBotHandlers() {
     
     if (replyText) {
       // Send Reply back to group/user
-      await ctx.reply(replyText, {
+      const sentMessage = await ctx.reply(replyText, {
         reply_parameters: { message_id: message.message_id }
       });
       await logSystem('SYSTEM', `Sent response to ${msgRecord.user_fullname}: "${replyText.substring(0, 50)}..."`);
+      
+      // Save bot's reply to short-term memory database (rolling buffer)
+      const botRecord = {
+        telegram_message_id: sentMessage.message_id,
+        chat_id: chatId,
+        user_id: ctx.me.id,
+        username: ctx.me.username || '',
+        user_fullname: ctx.me.first_name || 'Bot',
+        content: replyText,
+        reply_to_message_id: message.message_id
+      };
+      await addMessageToBuffer(botRecord);
     }
   });
 
@@ -176,6 +195,16 @@ app.get('/api/logs', async (req, res) => {
   }
 });
 
+// 2.2 Model Usage Stats
+app.get('/api/usage', async (req, res) => {
+  try {
+    const stats = await getModelUsageStats();
+    res.json(stats);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // 3. Clear Logs
 app.post('/api/logs/clear', async (req, res) => {
   try {
@@ -212,6 +241,76 @@ app.post('/api/discover', async (req, res) => {
     // Run discovery asynchronously so request doesn't timeout
     discoverFreeModels();
     res.json({ success: true, message: 'Discovery job triggered successfully.' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ------------------------------------------------------------------------------
+// Developer Console API Endpoints
+// ------------------------------------------------------------------------------
+
+// 7. Get Active Trace Flow
+app.get('/api/dev/active-flow', (req, res) => {
+  try {
+    res.json(getCurrentTrace());
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 8. Get API Key Pool Status
+app.get('/api/dev/keys-status', (req, res) => {
+  try {
+    res.json(getKeyStatus());
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 9. Manual Agent/Model Tester
+app.post('/api/dev/test-model', async (req, res) => {
+  try {
+    const { model, tier, prompt, systemInstruction } = req.body;
+
+    const reply = await generateText({
+      tier: tier || null,
+      forceModel: model || null,
+      prompt: prompt,
+      systemInstruction: systemInstruction || ''
+    });
+
+    res.json({ success: true, reply });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 10. Manual Tool sandbox executor
+app.post('/api/dev/test-tool', async (req, res) => {
+  try {
+    const { toolName, args } = req.body;
+    const allowedChatId = Number(process.env.ALLOWED_CHAT_ID);
+    let result = null;
+
+    if (toolName === 'webSearch') {
+      result = await webSearch(args[0]);
+    } else {
+      return res.status(400).json({ error: `Tool ${toolName} not supported in sandbox.` });
+    }
+
+    res.json({ success: true, result });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 11. Trigger Passive Observer Sweep
+app.post('/api/dev/trigger-digest', async (req, res) => {
+  try {
+    const allowedChatId = Number(process.env.ALLOWED_CHAT_ID);
+    runObserverDigest(allowedChatId, 100);
+    res.json({ success: true, message: 'Observer sweep started in background.' });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

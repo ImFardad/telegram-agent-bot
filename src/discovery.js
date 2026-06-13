@@ -1,4 +1,6 @@
 import { logSystem, registerModel, clearRegisteredModels } from './database.js';
+import { generateText } from './router.js';
+import { addTraceStep } from './trace.js';
 
 export async function discoverFreeModels() {
   const apiKey = process.env.OPENROUTER_API_KEY;
@@ -8,6 +10,7 @@ export async function discoverFreeModels() {
   }
 
   await logSystem('DISCOVERY', 'Starting OpenRouter free models discovery...');
+  addTraceStep('DISCOVERY', 'pending', 'Fetching raw list of models from OpenRouter API');
 
   try {
     // 1. Fetch all models from OpenRouter
@@ -27,31 +30,77 @@ export async function discoverFreeModels() {
       return isFreePrice || isFreeInId;
     });
 
-    await logSystem('DISCOVERY', `Found ${freeModels.length} free models on OpenRouter. Benchmarking top models...`);
+    await logSystem('DISCOVERY', `Found ${freeModels.length} free models on OpenRouter. Handing list to Gemma for evaluation...`);
+    addTraceStep('DISCOVERY', 'pending', `Gemma evaluating ${freeModels.length} free models`);
 
-    // We will clear registry and rebuild it with fresh test results
+    // 3. Ask Gemma to analyze and select the top 8 models for our bot tasks
+    const simplifiedList = freeModels.map(m => ({
+      id: m.id,
+      name: m.name,
+      context_length: m.context_length,
+      description: (m.description || '').substring(0, 150)
+    }));
+
+    const evaluationPrompt = `
+You are the Group Observer and Discovery Agent. Below is a list of free models currently available on OpenRouter:
+${JSON.stringify(simplifiedList, null, 2)}
+
+Analyze this list. Filter out legacy, deprecated, or unstable test models. Select up to 8 of the best active models suitable for general chat, logical tasks, or tool execution.
+Determine if they likely support tool-calling based on their model type (e.g. Llama-3, Gemma-2, Qwen-2, Mistral).
+
+Your output MUST be a valid JSON array of objects. Do not include markdown codeblocks (like \`\`\`json). Output raw JSON only.
+Match this schema for each object in the array:
+{
+  "model_id": "string (the exact id from the list)",
+  "name": "string (name from list)",
+  "context_length": number,
+  "supports_tools": number (1 if it supports tool calling/functions, otherwise 0)
+}
+`;
+
+    let selectedModels = [];
+    try {
+      const gemmaEvaluation = await generateText({
+        tier: 'GEMMA_PLANNER',
+        prompt: evaluationPrompt,
+        systemInstruction: 'You are a precise technical evaluator. Output raw JSON arrays only.',
+        jsonMode: true
+      });
+
+      let cleaned = gemmaEvaluation.trim();
+      const arrayMatch = cleaned.match(/\[[\s\S]*\]/);
+      if (arrayMatch) {
+        cleaned = arrayMatch[0];
+      } else if (cleaned.startsWith('```')) {
+        cleaned = cleaned.replace(/^```json\s*/i, '').replace(/```$/, '').trim();
+      }
+      selectedModels = JSON.parse(cleaned);
+      await logSystem('DISCOVERY', `Gemma successfully selected and ranked ${selectedModels.length} models.`);
+    } catch (gemmaError) {
+      await logSystem('DISCOVERY', `Gemma evaluation failed: ${gemmaError.message}. Falling back to default slicing.`);
+      // Slicing fallback
+      selectedModels = freeModels.slice(0, 8).map(m => ({
+        model_id: m.id,
+        name: m.name,
+        context_length: m.context_length || 4096,
+        supports_tools: m.id.includes('llama-3') || m.id.includes('gemma-2') ? 1 : 0
+      }));
+    }
+
+    addTraceStep('DISCOVERY', 'pending', `Benchmarking latency for ${selectedModels.length} selected models`);
     await clearRegisteredModels();
 
-    // Limit to testing the top 10 models to prevent hitting rate limits during testing
-    const modelsToTest = freeModels.slice(0, 10);
     const discovered = [];
 
-    for (const model of modelsToTest) {
-      await logSystem('DISCOVERY', `Testing model: ${model.id}`);
+    // 4. Benchmark each selected model
+    for (const model of selectedModels) {
+      await logSystem('DISCOVERY', `Testing model latency: ${model.model_id}`);
       
       const startTime = Date.now();
       let success = false;
       let latency = 9999;
-      let supportsTools = 0;
-
-      // Check tool calling support from description or metadata
-      const desc = (model.description || '').toLowerCase();
-      if (desc.includes('tool calling') || desc.includes('function call') || desc.includes('function-calling') || model.id.includes('llama-3') || model.id.includes('gemma-2')) {
-        supportsTools = 1;
-      }
 
       try {
-        // Quick benchmark API call
         const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
           method: 'POST',
           headers: {
@@ -59,7 +108,7 @@ export async function discoverFreeModels() {
             'Content-Type': 'application/json'
           },
           body: JSON.stringify({
-            model: model.id,
+            model: model.model_id,
             messages: [{ role: 'user', content: 'Ping. Reply with "Pong" only.' }],
             temperature: 0.1,
             max_tokens: 5
@@ -68,30 +117,38 @@ export async function discoverFreeModels() {
 
         if (response.ok) {
           const result = await response.json();
-          const reply = result.choices?.[0]?.message?.content;
+          const reply = result?.choices?.[0]?.message?.content;
           if (reply && reply.toLowerCase().includes('pong')) {
             success = true;
             latency = Date.now() - startTime;
           }
+        } else {
+          const errText = await response.text();
+          let parsedErr = errText;
+          try {
+            const parsed = JSON.parse(errText);
+            if (parsed.error && parsed.error.message) {
+              parsedErr = parsed.error.message;
+            }
+          } catch (e) {}
+          await logSystem('DISCOVERY', `OpenRouter API error (${response.status}) for ${model.model_id}: ${parsedErr}`);
         }
       } catch (err) {
-        logSystem('DISCOVERY', `Error testing ${model.id}: ${err.message}`);
+        await logSystem('DISCOVERY', `Error testing ${model.model_id}: ${err.message}`);
       }
 
       if (success) {
-        // Scoring calculation: Higher context and tools, lower latency
-        const contextScore = Math.min(model.context_length / 16384, 2); // Cap context length weight
-        const latencyScore = Math.max(10 - (latency / 1000), 0); // 0 to 10 points (lower latency is better)
-        const toolScore = supportsTools ? 3 : 0;
-        
-        // Final Score
+        // Scoring formula
+        const contextScore = Math.min(model.context_length / 16384, 2);
+        const latencyScore = Math.max(10 - (latency / 1000), 0);
+        const toolScore = model.supports_tools ? 3 : 0;
         const score = (contextScore * 2) + latencyScore + toolScore;
 
         const modelEntry = {
-          model_id: model.id,
-          name: model.name || model.id,
+          model_id: model.model_id,
+          name: model.name || model.model_id,
           context_length: model.context_length || 4096,
-          supports_tools: supportsTools,
+          supports_tools: model.supports_tools || 0,
           latency: latency,
           reliability: 1.0,
           score: parseFloat(score.toFixed(2))
@@ -99,24 +156,25 @@ export async function discoverFreeModels() {
 
         await registerModel(modelEntry);
         discovered.push(modelEntry);
-        await logSystem('DISCOVERY', `Registered: ${model.id} | Score: ${modelEntry.score} | Latency: ${latency}ms`);
+        await logSystem('DISCOVERY', `Registered: ${model.model_id} | Score: ${modelEntry.score} | Latency: ${latency}ms`);
       } else {
-        await logSystem('DISCOVERY', `Skipping ${model.id} (failed ping benchmark)`);
+        await logSystem('DISCOVERY', `Skipping ${model.model_id} (failed benchmark test)`);
       }
     }
 
     await logSystem('DISCOVERY', `OpenRouter discovery finished. Registered ${discovered.length} active models.`);
+    addTraceStep('DISCOVERY', 'success', `OpenRouter discovery completed. Registered ${discovered.length} active models.`);
     return discovered;
 
   } catch (error) {
     await logSystem('DISCOVERY', `Discovery job failed: ${error.message}`);
+    addTraceStep('DISCOVERY', 'failed', `Discovery failed: ${error.message}`);
     return [];
   }
 }
 
 // Start discovery interval (runs every 24 hours)
 export function startDiscoverySchedule() {
-  // Trigger initial discovery on startup in 10 seconds to not block main thread
   setTimeout(async () => {
     try {
       await discoverFreeModels();
@@ -125,7 +183,6 @@ export function startDiscoverySchedule() {
     }
   }, 10000);
 
-  // Set 24 hour interval
   const INTERVAL_24H = 24 * 60 * 60 * 1000;
   setInterval(async () => {
     try {

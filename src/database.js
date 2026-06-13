@@ -19,6 +19,9 @@ export async function initDatabase() {
     driver: sqlite3.Database
   });
 
+  // Enable WAL mode for concurrency
+  await db.run('PRAGMA journal_mode = WAL;');
+
   // Create Users Table
   await db.exec(`
     CREATE TABLE IF NOT EXISTS users (
@@ -77,6 +80,16 @@ export async function initDatabase() {
       category TEXT,
       message TEXT,
       timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  // Create Model Usage Tracking Table
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS model_usage (
+      model_id TEXT,
+      usage_date TEXT,
+      request_count INTEGER DEFAULT 0,
+      PRIMARY KEY (model_id, usage_date)
     )
   `);
 
@@ -248,4 +261,33 @@ export async function getRegisteredModels() {
 export async function clearRegisteredModels() {
   if (!db) return;
   await db.run('DELETE FROM model_registry');
+}
+
+export async function incrementModelUsage(modelId) {
+  if (!db) return;
+  const currentDate = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+  try {
+    await db.run(`
+      INSERT INTO model_usage (model_id, usage_date, request_count)
+      VALUES (?, ?, 1)
+      ON CONFLICT(model_id, usage_date) DO UPDATE SET request_count = request_count + 1
+    `, [modelId, currentDate]);
+  } catch (err) {
+    console.error(`Failed to increment model usage for ${modelId}:`, err);
+  }
+}
+
+export async function getModelUsageStats() {
+  if (!db) return [];
+  try {
+    return await db.all(`
+      SELECT model_id, usage_date, request_count
+      FROM model_usage
+      ORDER BY usage_date DESC, request_count DESC
+      LIMIT 100
+    `);
+  } catch (err) {
+    console.error('Failed to get model usage stats:', err);
+    return [];
+  }
 }

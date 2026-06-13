@@ -2,12 +2,14 @@
 let activeTab = 'tab-overview';
 let userProfiles = [];
 let pollingInterval = null;
+let flowInterval = null;
 
 // Tab Routing titles
 const TAB_TITLES = {
   'tab-overview': { title: 'Dashboard Overview', subtitle: 'System metrics, real-time activity, and performance.' },
   'tab-memory': { title: 'Long-Term Memory Profiles', subtitle: 'Explore and manage cognitive profiles of group members.' },
-  'tab-router': { title: 'Model Routing Registry', subtitle: 'Dynamic list of discovered free models from OpenRouter.' }
+  'tab-router': { title: 'Model Routing Registry', subtitle: 'Dynamic list of discovered free models from OpenRouter.' },
+  'tab-dev': { title: 'Developer Control Console', subtitle: 'Execute manual model runs, verify API key pools, run observer digests, and trace active message flows.' }
 };
 
 // Initialize Application
@@ -42,6 +44,20 @@ function setupNavigation() {
       // Load specific tab data
       if (activeTab === 'tab-memory') fetchUsers();
       if (activeTab === 'tab-router') fetchModels();
+      
+      // Handle Developer Flow Polling
+      if (activeTab === 'tab-dev') {
+        fetchKeysStatus();
+        fetchFlowTrace();
+        if (!flowInterval) {
+          flowInterval = setInterval(fetchFlowTrace, 2000);
+        }
+      } else {
+        if (flowInterval) {
+          clearInterval(flowInterval);
+          flowInterval = null;
+        }
+      }
     });
   });
 
@@ -66,9 +82,10 @@ function startPolling() {
 
 async function fetchStatusAndLogs() {
   try {
-    const [statusRes, logsRes] = await Promise.all([
+    const [statusRes, logsRes, usageRes] = await Promise.all([
       fetch('/api/status'),
-      fetch('/api/logs')
+      fetch('/api/logs'),
+      fetch('/api/usage')
     ]);
 
     if (statusRes.ok) {
@@ -80,8 +97,13 @@ async function fetchStatusAndLogs() {
       const logs = await logsRes.json();
       renderLogs(logs);
     }
+
+    if (usageRes.ok) {
+      const usage = await usageRes.json();
+      renderUsageTable(usage);
+    }
   } catch (error) {
-    console.error('Error polling status/logs:', error);
+    console.error('Error polling status/logs/usage:', error);
   }
 }
 
@@ -143,6 +165,27 @@ function renderLogs(logs) {
   if (isScrolledToBottom) {
     consoleBody.scrollTop = consoleBody.scrollHeight;
   }
+}
+
+function renderUsageTable(usage) {
+  const tableBody = document.getElementById('usage-table-body');
+  if (!tableBody) return;
+  if (!usage || usage.length === 0) {
+    tableBody.innerHTML = '<tr><td colspan="3" class="table-empty">No requests logged yet today.</td></tr>';
+    return;
+  }
+
+  const html = usage.map(row => {
+    return `
+      <tr>
+        <td><strong>${escapeHTML(row.usage_date)}</strong></td>
+        <td class="model-name-cell">${escapeHTML(row.model_id)}</td>
+        <td><strong>${row.request_count}</strong> requests</td>
+      </tr>
+    `;
+  }).join('');
+
+  tableBody.innerHTML = html;
 }
 
 // ------------------------------------------------------------------------------
@@ -280,6 +323,12 @@ function setupActionListeners() {
   // Refresh Logs Button
   document.getElementById('btn-refresh-logs').addEventListener('click', fetchStatusAndLogs);
 
+  // Refresh Usage Button
+  const btnRefreshUsage = document.getElementById('btn-refresh-usage');
+  if (btnRefreshUsage) {
+    btnRefreshUsage.addEventListener('click', fetchStatusAndLogs);
+  }
+
   // Trigger Model Scan Button
   document.getElementById('btn-trigger-discovery').addEventListener('click', async (e) => {
     const btn = e.currentTarget;
@@ -302,11 +351,249 @@ function setupActionListeners() {
       btn.innerHTML = '<i class="ri-radar-line"></i> Trigger Model Scan';
     }
   });
+
+  // ----------------------------------------------------------------------------
+  // Dev Tab Actions
+  // ----------------------------------------------------------------------------
+
+  // Manual Model Call Sandbox Submit
+  const formTestModel = document.getElementById('form-test-model');
+  if (formTestModel) {
+    formTestModel.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = document.getElementById('btn-test-model');
+      const resultBox = document.getElementById('sandbox-model-result');
+      
+      const tier = document.getElementById('sandbox-tier').value;
+      const model = document.getElementById('sandbox-model').value;
+      const prompt = document.getElementById('sandbox-prompt').value;
+      const systemInstruction = document.getElementById('sandbox-system').value;
+      
+      if (!tier && !model) {
+        alert('Please select either a Routing Tier or a Direct Model ID.');
+        return;
+      }
+      
+      btn.disabled = true;
+      btn.innerHTML = '<i class="ri-loader-4-line ri-spin"></i> Executing...';
+      resultBox.innerHTML = '<div class="loader">Querying model endpoint, please wait...</div>';
+      
+      try {
+        const res = await fetch('/api/dev/test-model', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ tier, model, prompt, systemInstruction })
+        });
+        
+        const data = await res.json();
+        
+        if (res.ok && data.success) {
+          // Render plain text output
+          resultBox.textContent = data.reply;
+        } else {
+          resultBox.innerHTML = `<span class="text-danger">Error: ${data.error || 'Execution failed.'}</span>`;
+        }
+      } catch (err) {
+        resultBox.innerHTML = `<span class="text-danger">Request Failed: ${err.message}</span>`;
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="ri-play-line"></i> Run Model Call';
+        fetchKeysStatus();
+        fetchFlowTrace();
+      }
+    });
+  }
+
+  // Manual Tool sandbox executor submit
+  const formTestTool = document.getElementById('form-test-tool');
+  if (formTestTool) {
+    formTestTool.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = document.getElementById('btn-test-tool');
+      const resultBox = document.getElementById('sandbox-tool-result');
+      
+      const toolName = document.getElementById('sandbox-tool-select').value;
+      const arg = document.getElementById('sandbox-tool-arg').value;
+      
+      btn.disabled = true;
+      btn.innerHTML = '<i class="ri-loader-4-line ri-spin"></i> Executing Tool...';
+      resultBox.innerHTML = '<div class="loader">Running tool call in sandbox...</div>';
+      
+      try {
+        const res = await fetch('/api/dev/test-tool', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ toolName, args: [arg] })
+        });
+        
+        const data = await res.json();
+        
+        if (res.ok && data.success) {
+          const out = data.result;
+          resultBox.innerHTML = `<pre><code>${JSON.stringify(out, null, 2)}</code></pre>`;
+        } else {
+          resultBox.innerHTML = `<span class="text-danger">Error: ${data.error || 'Tool call failed.'}</span>`;
+        }
+      } catch (err) {
+        resultBox.innerHTML = `<span class="text-danger">Request Failed: ${err.message}</span>`;
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="ri-play-line"></i> Run Tool Call';
+        fetchFlowTrace();
+      }
+    });
+  }
+
+  // Trigger Observer sweep manually
+  const btnTriggerDigest = document.getElementById('btn-trigger-digest');
+  if (btnTriggerDigest) {
+    btnTriggerDigest.addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      btn.disabled = true;
+      btn.innerHTML = '<i class="ri-loader-4-line ri-spin"></i> Observing...';
+      
+      try {
+        const res = await fetch('/api/dev/trigger-digest', { method: 'POST' });
+        if (res.ok) {
+          alert('Passive Observer Sweep triggered in the background. Check logs console.');
+        } else {
+          alert('Failed to trigger Observer sweep.');
+        }
+      } catch (err) {
+        console.error(err);
+        alert('Error triggering sweep.');
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="ri-radar-line"></i> Execute Observer Sweep';
+      }
+    });
+  }
+
+  // Refresh flow button click
+  const btnRefreshFlow = document.getElementById('btn-refresh-flow');
+  if (btnRefreshFlow) {
+    btnRefreshFlow.addEventListener('click', fetchFlowTrace);
+  }
 }
 
 function fetchInitialData() {
-  // Trigger initial loads
   fetchStatusAndLogs();
+}
+
+// ------------------------------------------------------------------------------
+// Dev Console Fetch & Renders
+// ------------------------------------------------------------------------------
+
+async function fetchKeysStatus() {
+  const container = document.getElementById('keys-status-grid');
+  if (!container) return;
+  
+  try {
+    const res = await fetch('/api/dev/keys-status');
+    if (!res.ok) throw new Error('Failed to load key statuses');
+    const data = await res.json();
+    
+    let html = '';
+    const renderCard = (key, type) => {
+      const typeBadge = type === 'active' ? 'badge-skill' : 'badge-interest';
+      const statusClass = key.status === 'HEALTHY' ? 'text-success' : (key.status === 'ERROR' ? 'text-danger' : 'text-muted');
+      
+      return `
+        <div class="key-status-card">
+          <div class="key-status-header">
+            <h4>${key.name}</h4>
+            <span class="badge ${typeBadge}">${type.toUpperCase()}</span>
+          </div>
+          <div class="key-status-details">
+            <p>Configured: <strong>${key.configured ? '✅ Yes' : '❌ No'}</strong></p>
+            <p>Pool Status: <span class="${statusClass}"><strong>${key.status}</strong></span></p>
+            <p>Error Count: <code>${key.errorCount}</code></p>
+            <p>Last Used: <small>${key.lastUsed}</small></p>
+          </div>
+        </div>
+      `;
+    };
+    
+    data.active.forEach(k => { html += renderCard(k, 'active'); });
+    data.backup.forEach(k => { html += renderCard(k, 'backup'); });
+    
+    container.innerHTML = html;
+  } catch (error) {
+    container.innerHTML = `<div class="text-danger text-center w-full">Error: ${error.message}</div>`;
+  }
+}
+
+async function fetchFlowTrace() {
+  const treeContainer = document.getElementById('flow-tree-container');
+  if (!treeContainer) return;
+  
+  try {
+    const res = await fetch('/api/dev/active-flow');
+    if (!res.ok) throw new Error('Failed to fetch trace');
+    const trace = await res.json();
+    
+    renderFlowTree(trace);
+  } catch (error) {
+    console.error('Error fetching flow:', error);
+  }
+}
+
+function renderFlowTree(trace) {
+  const treeContainer = document.getElementById('flow-tree-container');
+  const userTag = document.getElementById('flow-user-tag');
+  const msgText = document.getElementById('flow-msg-text');
+  
+  if (!trace || !trace.steps || trace.steps.length === 0) {
+    userTag.textContent = 'No message active';
+    msgText.textContent = 'Awaiting message triggers... send a message on Telegram or use the sandbox model tester below.';
+    treeContainer.innerHTML = `
+      <div class="flow-step empty">
+        <div class="flow-step-dot"></div>
+        <div class="flow-step-content">
+          <h4>No active trace loaded</h4>
+          <p>Send a message on Telegram or execute the Model Tester below to see the trace tree diagram.</p>
+        </div>
+      </div>
+    `;
+    return;
+  }
+  
+  userTag.textContent = `@${trace.user || 'User'}`;
+  msgText.textContent = `"${trace.message || ''}"`;
+  
+  const iconMap = {
+    'RECEIVE': 'ri-chat-download-line',
+    'CLASSIFY': 'ri-filter-line',
+    'PLANNER': 'ri-brain-line',
+    'TOOL': 'ri-tools-line',
+    'SYNTHESIS': 'ri-edit-box-line',
+    'ROUTER': 'ri-route-line',
+    'DISCOVERY': 'ri-radar-line',
+    'OBSERVER': 'ri-bubble-chart-line'
+  };
+  
+  const html = trace.steps.map(step => {
+    const icon = iconMap[step.stage] || 'ri-checkbox-blank-circle-line';
+    const statusClass = step.status; // success, failed, pending
+    const time = new Date(step.timestamp).toLocaleTimeString();
+    
+    return `
+      <div class="flow-step step-${statusClass}">
+        <div class="flow-step-dot ${statusClass}">
+          <i class="${icon} ${statusClass === 'pending' ? 'ri-spin' : ''}"></i>
+        </div>
+        <div class="flow-step-content">
+          <div class="flow-step-header">
+            <h4>${step.stage}</h4>
+            <span class="step-time">[${time}]</span>
+          </div>
+          <p>${escapeHTML(step.details)}</p>
+        </div>
+      </div>
+    `;
+  }).join('');
+  
+  treeContainer.innerHTML = html;
 }
 
 // Helper to escape HTML tags

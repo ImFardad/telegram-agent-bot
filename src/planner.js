@@ -1,5 +1,6 @@
-import { logSystem, getUserProfile, getRecentMessages, createUserProfile } from './database.js';
+import { logSystem, getUserProfile, getRecentMessages, createUserProfile, addMessageToBuffer } from './database.js';
 import { generateText } from './router.js';
+import { startNewTrace, addTraceStep } from './trace.js';
 import * as tools from './tools.js';
 
 const CORE_PROMPT = `
@@ -14,11 +15,14 @@ Memory is the source of identity. Tools are preferred over assumptions. Long-ter
 const PLANNER_SYSTEM_INSTRUCTION = `
 ${CORE_PROMPT}
 
-You are the Planner & Brain. Your job is to analyze the incoming message, check the sender's long-term memory, and decide:
+You are the Planner & Brain (Coordinating Memory, Creative, and Persona Agents). Your job is to analyze the incoming message, check the sender's long-term memory, and decide:
 1. Whether we should respond at all.
-2. If we need to call any of our available tools (memory, moderation, search, vision).
+2. If we need to call any of our available tools (memory, moderation, search, maps, vision).
 3. How the final text response should be drafted (instructions, tone, key details).
-4. Which model tier should generate the final message (LITE, FLASH, or OPENROUTER).
+4. Which model tier should generate the final message:
+   - GEMMA: For very simple greetings (like "سلام", "چطور مطوری", "چه خبر"), short acknowledgements, or simple casual chitchat. (Highly optimized, zero Gemini quota cost).
+   - LITE: For general conversation, questions, and descriptions requiring standard reasoning or general knowledge (uses Gemini Lite).
+   - FLASH: For complex logic, coding, technical assistance, or deep mathematical analysis (uses Gemini Flash).
 
 Available Tools:
 - remember(userId, fact): Saves a new fact about a user.
@@ -31,6 +35,7 @@ Available Tools:
 - warnUser(chatId, userId, reason): Warns a user. Mutes on 3 warnings.
 - webSearch(query): Searches the web for information.
 - analyzeImage(fileId): Analyzes an image and gets its text/description.
+- followDiscussion(): Summarizes the last 100 messages in the group to catch up on the ongoing conversation. Call this tool when a user tags you and asks for your opinion on the recent discussion, or asks you to summarize what happened.
 
 Your output MUST be a valid JSON object. Do not include markdown codeblocks (like \`\`\`json) in your final reply. Output raw JSON only, matching this schema:
 {
@@ -38,7 +43,8 @@ Your output MUST be a valid JSON object. Do not include markdown codeblocks (lik
   "tool_to_call": "toolName" or null,
   "tool_args": [arg1, arg2] or null,
   "generation_instructions": "Guidelines for drafting the response, including tone, style, and what memory facts to reference.",
-  "assigned_tier": "LITE" | "FLASH" | "OPENROUTER"
+  "assigned_tier": "GEMMA" | "LITE" | "FLASH",
+  "intermediate_message": "Required ONLY when tool_to_call is 'followDiscussion'. Set this to a natural, witty, and friendly message in Persian saying you are going to read the recent messages to catch up (e.g. 'یک لحظه وایسا ببینم چیه بحث...'). Otherwise set to null."
 }
 `;
 
@@ -53,7 +59,6 @@ function parseLLMResponse(text) {
   try {
     return JSON.parse(cleaned);
   } catch (error) {
-    // Attempt parsing with regex fallback if JSON is broken but contains schema
     const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
       try {
@@ -72,24 +77,29 @@ export async function runPlanner(ctx, category) {
   const userId = message.from.id;
   const username = message.from.username || '';
   const fullName = [message.from.first_name, message.from.last_name].filter(Boolean).join(' ');
+  const messageText = message.text || message.caption || '[Attachment]';
 
+  // 1. Initialize message trace for the Visualizer
+  startNewTrace(message.message_id, fullName, messageText);
+  addTraceStep('CLASSIFY', 'success', `Classified message as: ${category}`);
+  
   await logSystem('PLANNER', `Processing message from ${fullName} in chat ${chatId}`);
 
-  // 1. Fetch or create sender profile
+  // 2. Fetch or create sender profile
   let profile = await getUserProfile(userId);
   if (!profile) {
     profile = await createUserProfile(userId, fullName);
     await logSystem('PLANNER', `Created new user profile for ${fullName} (${userId})`);
   }
 
-  // 2. Fetch short memory context (last 15 messages)
+  // 3. Fetch short memory context (last 15 messages)
   const historyRaw = await getRecentMessages(chatId, 15);
   const formattedHistory = historyRaw.reverse().map(msg => ({
     role: msg.user_id === ctx.me.id ? 'assistant' : 'user',
     content: `[${msg.user_fullname}]: ${msg.content}`
   }));
 
-  // 3. Compose current state for the Planner
+  // 4. Compose current state for the Planner
   const userFactSummary = profile ? JSON.stringify({
     name: profile.name,
     nicknames: profile.nicknames,
@@ -99,14 +109,22 @@ export async function runPlanner(ctx, category) {
     facts: profile.facts
   }, null, 2) : '{}';
 
+  const repliedMessage = message.reply_to_message;
+  let repliedMessageSummary = 'None';
+  if (repliedMessage) {
+    const repliedSenderName = [repliedMessage.from?.first_name, repliedMessage.from?.last_name].filter(Boolean).join(' ') || 'Unknown';
+    const repliedText = repliedMessage.text || repliedMessage.caption || '[Attachment]';
+    repliedMessageSummary = `"[${repliedSenderName}]: ${repliedText}" (Message ID: ${repliedMessage.message_id})`;
+  }
+
   const currentPrompt = `
 Category determined by classifier: ${category}
 Incoming message details:
 - Sender Name: ${fullName} (Username: @${username})
 - Sender User ID: ${userId}
 - Message ID: ${message.message_id}
-- Message Content: "${message.text || message.caption || '[Attachment]'}"
-- Reply to Message ID: ${message.reply_to_message?.message_id || 'None'}
+- Message Content: "${messageText}"
+- Reply to Message: ${repliedMessageSummary}
 
 Sender Long-Term Memory Profile:
 ${userFactSummary}
@@ -115,19 +133,50 @@ Decide on should_respond, tool executions, and generation instructions. Respond 
 `;
 
   try {
+    addTraceStep('PLANNER', 'pending', 'Invoking Gemma Planner Agent (brain logic)');
+    
+    // Planner uses the GEMMA_PLANNER tier (Gemma 4 31B -> Gemma 4 26B -> Gemini 3.1 Lite)
     const plannerResponseText = await generateText({
-      tier: 'PLANNER',
+      tier: 'GEMMA_PLANNER',
       prompt: currentPrompt,
       systemInstruction: PLANNER_SYSTEM_INSTRUCTION,
-      history: formattedHistory
+      history: formattedHistory,
+      jsonMode: true
     });
 
     const decision = parseLLMResponse(plannerResponseText);
     await logSystem('PLANNER', `Planner decision: should_respond=${decision.should_respond}, tool_to_call=${decision.tool_to_call}`);
+    addTraceStep('PLANNER', 'success', `Planner decided should_respond=${decision.should_respond}, tool_to_call=${decision.tool_to_call || 'none'}, tier=${decision.assigned_tier}`);
 
     let toolResult = null;
 
-    // 4. Handle Tool Execution
+    // Send intermediate message immediately if tool is followDiscussion
+    if (decision.tool_to_call === 'followDiscussion') {
+      if (!decision.intermediate_message) {
+        decision.intermediate_message = "یک لحظه اجازه بده بحث‌های اخیر رو بخونم ببینم در چه مورده... 🧐";
+      }
+      try {
+        const sentIntMsg = await ctx.reply(decision.intermediate_message, {
+          reply_parameters: { message_id: message.message_id }
+        });
+        
+        // Save intermediate message to buffer
+        const intRecord = {
+          telegram_message_id: sentIntMsg.message_id,
+          chat_id: chatId,
+          user_id: ctx.me.id,
+          username: ctx.me.username || '',
+          user_fullname: ctx.me.first_name || 'Bot',
+          content: decision.intermediate_message,
+          reply_to_message_id: message.message_id
+        };
+        await addMessageToBuffer(intRecord);
+      } catch (err) {
+        await logSystem('PLANNER', `Failed to send intermediate message: ${err.message}`);
+      }
+    }
+
+    // 5. Handle Tool Execution
     if (decision.tool_to_call) {
       const toolName = decision.tool_to_call;
       const args = decision.tool_args || [];
@@ -136,7 +185,6 @@ Decide on should_respond, tool executions, and generation instructions. Respond 
       
       try {
         if (toolName === 'remember') {
-          // ensure correct userId is passed
           const targetUserId = args[0] === 'sender' || !args[0] ? userId : Number(args[0]);
           toolResult = await tools.remember(targetUserId, args[1], fullName);
         } else if (toolName === 'updateProfile') {
@@ -156,13 +204,19 @@ Decide on should_respond, tool executions, and generation instructions. Respond 
           toolResult = await tools.warnUser(chatId, args[0], args[1]);
         } else if (toolName === 'webSearch') {
           toolResult = await tools.webSearch(args[0]);
+        } else if (toolName === 'followDiscussion') {
+          toolResult = await tools.followDiscussion(chatId);
         } else if (toolName === 'analyzeImage') {
-          // If the message contains photo, use that file_id, otherwise use the argument
-          const photoFileId = message.photo?.[message.photo.length - 1]?.file_id || args[0];
+          const photoFileId = message.photo?.[message.photo.length - 1]?.file_id ||
+                              (message.document && message.document.mime_type?.startsWith('image/') ? message.document.file_id : null) ||
+                              message.reply_to_message?.photo?.[message.reply_to_message.photo.length - 1]?.file_id ||
+                              (message.reply_to_message?.document && message.reply_to_message.document.mime_type?.startsWith('image/') ? message.reply_to_message.document.file_id : null) ||
+                              args[0];
           if (photoFileId) {
             toolResult = await tools.analyzeImage(photoFileId);
           } else {
             toolResult = { success: false, error: 'No image attachment found.' };
+            addTraceStep('TOOL', 'failed', 'No image attachment found for analyzeImage');
           }
         } else {
           await logSystem('PLANNER', `Unknown tool: ${toolName}`);
@@ -175,11 +229,23 @@ Decide on should_respond, tool executions, and generation instructions. Respond 
       await logSystem('PLANNER', `Tool Execution Result: ${JSON.stringify(toolResult)}`);
     }
 
+    // If the followDiscussion tool failed, force gemma to write a Persian message explaining the error
+    let assignedTier = decision.assigned_tier || 'LITE';
+    let generationInstructions = decision.generation_instructions;
+
+    if (decision.tool_to_call === 'followDiscussion' && (!toolResult || !toolResult.success)) {
+      assignedTier = 'GEMMA';
+      generationInstructions = `The Live API WebSocket model (models/gemini-3-flash-live) failed after 5 retries. Write a witty, friendly, or polite message in Persian explaining that you had a technical issue and couldn't read the chat history to give your opinion.`;
+    }
+
     if (!decision.should_respond) {
+      addTraceStep('SYNTHESIS', 'success', 'Planner decided not to respond.');
       return null;
     }
 
-    // 5. Build Response Synthesis Prompt and invoke Specialist Worker Model
+
+
+    // 7. Build Response Synthesis Prompt and invoke Specialist Worker Model
     const synthesisSystemInstruction = `
 ${CORE_PROMPT}
 
@@ -190,32 +256,35 @@ Style Guidelines:
 `;
 
     let synthesisPrompt = `
-You are replying to: "${message.text || message.caption || '[Attachment]'}" sent by ${fullName}.
+You are replying to: "${messageText}" sent by ${fullName}.
 Sender Memory Profile: ${userFactSummary}
 
 Instructions from Planner:
-${decision.generation_instructions}
+${generationInstructions}
 `;
 
     if (toolResult) {
       synthesisPrompt += `\nTool executed during planning: ${decision.tool_to_call}\nTool Output Result: ${JSON.stringify(toolResult)}\nInclude this information naturally if appropriate.`;
     }
 
-    // Generate response text using the assigned worker model tier
+    addTraceStep('SYNTHESIS', 'pending', `Invoking Social Persona Agent (Tier: ${assignedTier})`);
+    
+    // Generate response text using the assigned worker model tier (LITE or FLASH)
     const replyText = await generateText({
-      tier: decision.assigned_tier || 'LITE',
+      tier: assignedTier,
       prompt: synthesisPrompt,
       systemInstruction: synthesisSystemInstruction,
       history: formattedHistory
     });
 
+    addTraceStep('SYNTHESIS', 'success', `Response compiled successfully`);
     return replyText;
 
   } catch (error) {
     await logSystem('PLANNER', `Error in Planner loop: ${error.message}`);
-    // Safe fallback message to avoid breaking bot
+    addTraceStep('PLANNER', 'failed', `Error: ${error.message}`);
     if (category !== 'IGNORE') {
-      return "I'm having a hard time processing that right now. Everything okay?";
+      return "مشکلی در پردازش پیام پیش اومده. همه‌چیز مرتبه؟";
     }
     return null;
   }

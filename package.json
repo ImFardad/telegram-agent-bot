@@ -5,8 +5,8 @@
   "main": "server.js",
   "type": "module",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js"
+    "start": "node --experimental-websocket server.js",
+    "dev": "node --experimental-websocket server.js"
   },
   "dependencies": {
     "express": "^4.19.2",
