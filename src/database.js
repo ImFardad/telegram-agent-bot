@@ -93,6 +93,38 @@ export async function initDatabase() {
     )
   `);
 
+  // Create Collective Memory Table
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS collective_memory (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      chat_id INTEGER,
+      event_description TEXT NOT NULL,
+      timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  // Create Group State Table
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS group_state (
+      chat_id INTEGER PRIMARY KEY,
+      vibe TEXT,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  // Create Social Links Table (Relational Graph)
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS social_links (
+      chat_id INTEGER,
+      user_a_id INTEGER,
+      user_b_id INTEGER,
+      relation_type TEXT,
+      description TEXT,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (chat_id, user_a_id, user_b_id)
+    )
+  `);
+
   // Log initialization
   await logSystem('DATABASE', 'Database initialized successfully.');
   return db;
@@ -290,4 +322,58 @@ export async function getModelUsageStats() {
     console.error('Failed to get model usage stats:', err);
     return [];
   }
+}
+
+// Group State & Vibe Helpers
+export async function updateGroupVibe(chatId, vibe) {
+  if (!db) return;
+  await db.run(
+    `INSERT INTO group_state (chat_id, vibe) VALUES (?, ?)
+     ON CONFLICT(chat_id) DO UPDATE SET vibe = excluded.vibe, updated_at = CURRENT_TIMESTAMP`,
+    [chatId, vibe]
+  );
+}
+
+export async function getGroupVibe(chatId) {
+  if (!db) return null;
+  const row = await db.get('SELECT vibe FROM group_state WHERE chat_id = ?', [chatId]);
+  return row ? row.vibe : 'Neutral';
+}
+
+// Collective Memory Helpers
+export async function addCollectiveMemory(chatId, eventDescription) {
+  if (!db) return;
+  await db.run(
+    'INSERT INTO collective_memory (chat_id, event_description) VALUES (?, ?)',
+    [chatId, eventDescription]
+  );
+}
+
+export async function getCollectiveMemories(chatId, limit = 10) {
+  if (!db) return [];
+  return db.all(
+    'SELECT * FROM collective_memory WHERE chat_id = ? ORDER BY timestamp DESC LIMIT ?',
+    [chatId, limit]
+  );
+}
+
+// Social Links (Relational Graph) Helpers
+export async function updateSocialLink(chatId, userAId, userBId, type, description) {
+  if (!db) return;
+  // Ensure userAId < userBId for canonical representation
+  const [id1, id2] = userAId < userBId ? [userAId, userBId] : [userBId, userAId];
+  await db.run(
+    `INSERT INTO social_links (chat_id, user_a_id, user_b_id, relation_type, description)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(chat_id, user_a_id, user_b_id) DO UPDATE SET
+      relation_type = excluded.relation_type,
+      description = excluded.description,
+      updated_at = CURRENT_TIMESTAMP`,
+    [chatId, id1, id2, type, description]
+  );
+}
+
+export async function getSocialLinks(chatId) {
+  if (!db) return [];
+  return db.all('SELECT * FROM social_links WHERE chat_id = ?', [chatId]);
 }

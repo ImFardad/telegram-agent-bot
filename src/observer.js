@@ -1,4 +1,4 @@
-import { getRecentMessages, logSystem } from './database.js';
+import { getRecentMessages, logSystem, updateGroupVibe, addCollectiveMemory, updateSocialLink } from './database.js';
 import { generateText } from './router.js';
 import { addTraceStep } from './trace.js';
 import { remember } from './tools.js';
@@ -25,7 +25,7 @@ export async function runObserverDigest(chatId, limit = 100) {
       .map(msg => `[${new Date(msg.timestamp).toLocaleTimeString()}] ${msg.user_fullname} (${msg.user_id}): ${msg.content}`)
       .join('\n');
 
-    addTraceStep('OBSERVER', 'pending', `Ingesting transcript (${transcript.length} characters) via Live/High-Context API`);
+    addTraceStep('OBSERVER', 'pending', `Ingesting transcript (${transcript.length} characters) via Gemma Tier`);
 
     const digestPrompt = `
 You are the Group Observer Agent. Your role is to passively observe the group transcript, analyze the dynamics, extract cognitive user updates, and summarize the conversation.
@@ -37,15 +37,24 @@ ${transcript}
 
 Identify:
 1. **Active Topics**: What is being discussed?
-2. **Sentiment & Vibe**: What is the overall mood of the group?
-3. **Relationships**: Are there interactions or connections between users? (e.g. User A is helping User B with React, User C is joking around).
-4. **Cognitive Facts**: Did any user state facts about themselves (interests, skills, current projects, hobbies, facts) that are not already known?
+2. **Sentiment & Vibe**: What is the overall mood of the group? (e.g., tiredness, excitement, tension, joy).
+3. **Relationships (Mental Graph)**: Are there specific interactions or connections between users? (e.g. User A is helping User B, User C is teasing User D).
+4. **Collective Memories**: Are there any shared events, jokes, or significant group milestones mentioned or occurred in this transcript?
+5. **Cognitive Facts**: Did any user state facts about themselves (interests, skills, current projects, hobbies, facts) that are not already known?
 
 Output a structured JSON summary matching this schema:
 {
   "topics": ["topic1", "topic2"],
-  "sentiment": "string description",
-  "relationships": ["User X and User Y are collaborating on Z"],
+  "vibe": "string description of mood",
+  "relationships": [
+    {
+      "user_a_id": number,
+      "user_b_id": number,
+      "type": "string (e.g. mentor, friend, rival)",
+      "description": "short description of their current interaction/link"
+    }
+  ],
+  "collective_memories": ["description of shared memory or event"],
   "extracted_facts": [
     {
       "user_id": number (the user_id from transcript),
@@ -56,9 +65,9 @@ Output a structured JSON summary matching this schema:
 }
 `;
 
-    // Call the high-capacity Gemini 3.1 Flash Lite (or Live model) for processing heavy context
+    // Use GEMMA tier for background vibe and relationship analysis as requested
     const responseText = await generateText({
-      forceModel: 'gemini-3.1-flash-lite',
+      tier: 'GEMMA',
       prompt: digestPrompt,
       systemInstruction: 'You are an objective group observer. Output raw JSON objects only matching the schema.',
       jsonMode: true
@@ -75,9 +84,30 @@ Output a structured JSON summary matching this schema:
     const digest = JSON.parse(cleaned);
 
     await logSystem('OBSERVER', `Digest completed. Topics: ${digest.topics.join(', ')}. Extracted ${digest.extracted_facts.length} new facts.`);
-    addTraceStep('OBSERVER', 'success', `Observer sweep completed. Extracted ${digest.extracted_facts.length} facts.`);
+    addTraceStep('OBSERVER', 'success', `Observer sweep completed. Mood: ${digest.vibe}.`);
 
-    // Feed extracted facts to the Memory Agent (remember facts automatically)
+    // 1. Update Group Vibe
+    if (digest.vibe) {
+      await updateGroupVibe(chatId, digest.vibe);
+    }
+
+    // 2. Persist Collective Memories
+    if (digest.collective_memories && digest.collective_memories.length > 0) {
+      for (const mem of digest.collective_memories) {
+        await addCollectiveMemory(chatId, mem);
+      }
+    }
+
+    // 3. Update Social Graph (Relationships)
+    if (digest.relationships && digest.relationships.length > 0) {
+      for (const rel of digest.relationships) {
+        if (rel.user_a_id && rel.user_b_id) {
+          await updateSocialLink(chatId, rel.user_a_id, rel.user_b_id, rel.type, rel.description);
+        }
+      }
+    }
+
+    // 4. Feed extracted facts to the Memory Agent (remember facts automatically)
     if (digest.extracted_facts && digest.extracted_facts.length > 0) {
       addTraceStep('OBSERVER', 'pending', `Memory Agent storing ${digest.extracted_facts.length} extracted facts in SQLite`);
       for (const item of digest.extracted_facts) {

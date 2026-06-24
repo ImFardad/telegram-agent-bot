@@ -1,4 +1,4 @@
-import { logSystem, getUserProfile, updateUserProfile, getAllUserProfiles, getRecentMessages } from './database.js';
+import { logSystem, getUserProfile, updateUserProfile, getAllUserProfiles, getRecentMessages, getSocialLinks, getCollectiveMemories } from './database.js';
 import { generateText } from './router.js';
 import { addTraceStep } from './trace.js';
 import fs from 'fs';
@@ -77,6 +77,22 @@ export async function updateProfile(userId, updates, userName = 'Unknown') {
   await logSystem('TOOL', `updateProfile() -> Updated profile for user ${userId}`);
   addTraceStep('TOOL', 'success', `User profile updated inside database`);
   return { success: true, profile };
+}
+
+export async function getSocialGraph(chatId) {
+  addTraceStep('TOOL', 'pending', `Running getSocialGraph() for chat ${chatId}`);
+  const links = await getSocialLinks(chatId);
+  await logSystem('TOOL', `getSocialGraph() -> Retrieved ${links.length} social links for chat ${chatId}`);
+  addTraceStep('TOOL', 'success', `Retrieved ${links.length} social links`);
+  return { success: true, social_graph: links };
+}
+
+export async function getCollectiveMemory(chatId) {
+  addTraceStep('TOOL', 'pending', `Running getCollectiveMemory() for chat ${chatId}`);
+  const memories = await getCollectiveMemories(chatId, 20);
+  await logSystem('TOOL', `getCollectiveMemory() -> Retrieved ${memories.length} memories for chat ${chatId}`);
+  addTraceStep('TOOL', 'success', `Retrieved ${memories.length} collective memories`);
+  return { success: true, collective_memory: memories };
 }
 
 // ------------------------------------------------------------------------------

@@ -106,6 +106,20 @@ async function startSystem() {
 
   // 3. Start OpenRouter Disocvery Job
   startDiscoverySchedule();
+
+  // 3b. Start Periodic Group Observer (every 30 minutes)
+  const allowedChatId = process.env.ALLOWED_CHAT_ID;
+  if (allowedChatId && allowedChatId !== 'your_telegram_chat_id_here') {
+    const chatIdNum = Number(allowedChatId);
+    setInterval(async () => {
+      try {
+        await runObserverDigest(chatIdNum, 100);
+      } catch (err) {
+        console.error('Periodic observer failed:', err);
+      }
+    }, 30 * 60 * 1000);
+    logSystem('SYSTEM', `Periodic Group Observer scheduled for chat ${allowedChatId} every 30 minutes.`);
+  }
   
   // 4. Start Express Server
   app.listen(PORT, () => {
