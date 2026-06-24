@@ -8,8 +8,8 @@ The bot uses a multi-tier model approach to balance reasoning quality, speed, an
 
 | Tier | Primary Model | Provider | Purpose |
 | :--- | :--- | :--- | :--- |
-| **GEMMA_PLANNER** | Gemma 4 31B | OpenRouter | **The "Brain"**: Analyzes incoming messages, decides whether to respond, and selects tools. |
-| **GEMMA** | Gemma 4 31B/26B | OpenRouter | **Social Observer & Simple Chitchat**: Handles background group vibe analysis, relationship extraction, and short casual replies. |
+| **GEMMA_PLANNER** | Gemma 4 31B | Google AI Studio | **The "Brain"**: Analyzes incoming messages, decides whether to respond, and selects tools. |
+| **GEMMA** | Gemma 4 31B/26B | Google AI Studio | **Social Observer & Simple Chitchat**: Handles background group vibe analysis, relationship extraction, and short casual replies. |
 | **LITE** | Gemini 3.1 Flash Lite | Google AI Studio | **General Persona**: Handles standard conversational replies, general knowledge questions, and descriptions. |
 | **FLASH** | Gemini 3.5 Flash | Google AI Studio | **Advanced Reasoning**: Used for complex logic, coding tasks, and deep analysis. |
 | **LIVE_DIGEST** | Gemini 3 Flash Live | Google AI Studio | **High-Volume Observer**: Used for real-time discussion summarization and processing high message volume via WebSockets. |
@@ -18,8 +18,8 @@ The bot uses a multi-tier model approach to balance reasoning quality, speed, an
 
 The system rotates between two main API providers:
 
-1.  **OpenRouter**: Used primarily for the **Gemma** models. OpenRouter allows us to access high-quality open-source models like Gemma 31B which provide the "Identity" of the bot.
-2.  **Google AI Studio (Gemini API)**: Used for high-capacity, low-latency processing and specialized tools (Vision, Live summarization, Search grounding).
+1.  **Google AI Studio (Gemini/Gemma API)**: Primary provider for both **Gemini** and **Gemma** models. Used for identity, planning, background analysis, and specialized tools (Vision, Live summarization, Search grounding).
+2.  **OpenRouter**: Used as a fallback provider and for model discovery.
 
 ### API Key Management & Rotation
 - **Sticky Rotation**: The bot uses a "sticky per-model" strategy for Gemini keys. A key is used for a specific model until it hits a quota error (429), at which point it rotates to the next available key in the pool (Active or Backup).
