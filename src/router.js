@@ -23,6 +23,11 @@ function cleanErrorMessage(msg) {
   return msg;
 }
 
+function isQuotaError(err) {
+  const msg = err.message.toLowerCase();
+  return msg.includes('429') || msg.includes('quota') || msg.includes('rate limit');
+}
+
 // Fallback chains for different tiers
 const FALLBACK_CHAINS = {
   GEMMA_PLANNER: ['gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemini-3.1-flash-lite'],
@@ -45,9 +50,9 @@ const keyHealth = {
   ]
 };
 
-// Index tracking for round-robin rotation
-let activeKeyIndex = 0;
-let backupKeyIndex = 0;
+// Index tracking for per-model rotation
+const activeKeyIndices = {};
+const backupKeyIndices = {};
 
 /**
  * Returns the status of the keys in the pool for the dashboard
@@ -236,110 +241,85 @@ async function callGeminiLiveAPI(prompt, systemInstruction = '', apiKey) {
  * Executes a call with automatic rotation and failover through Active and Backup pools
  */
 async function executeWithPool(type, modelName, payloadData, systemInstruction = '', grounding = null, jsonMode = false) {
-  let attempts = 0;
-  const maxAttempts = 6; // Limit infinite retries
   let lastError = null;
 
-  // 1. Try Active Pool
-  const activeKeys = keyHealth.active.filter(k => {
-    const val = process.env[k.name];
-    return val && !val.startsWith('your_');
-  });
+  const poolConfigs = [
+    { name: 'Active', keys: keyHealth.active, indices: activeKeyIndices },
+    { name: 'Backup', keys: keyHealth.backup, indices: backupKeyIndices }
+  ];
 
-  if (activeKeys.length > 0) {
-    for (let i = 0; i < activeKeys.length; i++) {
-      const currentIdx = (activeKeyIndex + i) % activeKeys.length;
-      const keyObj = activeKeys[currentIdx];
+  for (const config of poolConfigs) {
+    const validKeys = config.keys.filter(k => {
+      const val = process.env[k.name];
+      return val && !val.startsWith('your_');
+    });
+
+    if (validKeys.length === 0) continue;
+
+    // Get current index for this model in this pool
+    if (config.indices[modelName] === undefined) {
+      config.indices[modelName] = 0;
+    }
+
+    let startIndex = config.indices[modelName] % validKeys.length;
+
+    // Try all keys in this pool starting from the current one
+    for (let i = 0; i < validKeys.length; i++) {
+      const currentIdx = (startIndex + i) % validKeys.length;
+      const keyObj = validKeys[currentIdx];
       const apiKey = process.env[keyObj.name];
-      
-      keyObj.lastUsed = Date.now();
-      try {
-        let result;
+
+      // Update the "sticky" index for this model
+      config.indices[modelName] = currentIdx;
+
+      let keyRetries = 0;
+      const maxKeyRetries = 3;
+
+      while (keyRetries < maxKeyRetries) {
+        keyObj.lastUsed = Date.now();
         try {
+          let result;
           if (type === 'LIVE') {
             result = await callGeminiLiveAPI(payloadData, systemInstruction, apiKey);
           } else {
             result = await callGeminiAPI(modelName, payloadData, systemInstruction, apiKey, grounding, jsonMode);
           }
-        } catch (initialErr) {
-          const isFetchFailed = initialErr.message.toLowerCase().includes('fetch failed') || initialErr.message.toLowerCase().includes('socket');
-          if (isFetchFailed) {
-            await logSystem('ROUTER', `Fetch failed for ${keyObj.name}. Retrying once before failover...`);
-            if (type === 'LIVE') {
-              result = await callGeminiLiveAPI(payloadData, systemInstruction, apiKey);
-            } else {
-              result = await callGeminiAPI(modelName, payloadData, systemInstruction, apiKey, grounding, jsonMode);
-            }
+          keyObj.status = 'HEALTHY';
+          return result;
+        } catch (err) {
+          lastError = err;
+          const cleanErr = cleanErrorMessage(err.message);
+
+          if (isQuotaError(err)) {
+            keyObj.status = 'QUOTA_EXHAUSTED';
+            await logSystem('ROUTER', `${config.name} key ${keyObj.name} quota exhausted for ${modelName}. Waiting 10s before rotating...`);
+            addTraceStep('ROUTER', 'failed', `${keyObj.name} quota exhausted. Waiting 10s.`);
+
+            await new Promise(resolve => setTimeout(resolve, 10000));
+
+            // Move sticky index to next for next attempt
+            config.indices[modelName] = (currentIdx + 1) % validKeys.length;
+            break; // Try next key in the pool
           } else {
-            throw initialErr;
+            keyRetries++;
+            keyObj.status = 'ERROR';
+            keyObj.errorCount++;
+            await logSystem('ROUTER', `${config.name} key ${keyObj.name} error for ${modelName} (Attempt ${keyRetries}/${maxKeyRetries}): ${cleanErr}`);
+
+            if (keyRetries >= maxKeyRetries) {
+              await logSystem('ROUTER', `${config.name} key ${keyObj.name} failed all ${maxKeyRetries} retries. Rotating to next key...`);
+              config.indices[modelName] = (currentIdx + 1) % validKeys.length;
+              break; // Try next key
+            }
+            // Small delay for non-quota errors before retry
+            await new Promise(resolve => setTimeout(resolve, 1000));
           }
         }
-        keyObj.status = 'HEALTHY';
-        activeKeyIndex = (currentIdx + 1) % activeKeys.length; // Move to next key for next request
-        return result;
-      } catch (err) {
-        keyObj.status = 'ERROR';
-        keyObj.errorCount++;
-        lastError = err;
-        const cleanErr = cleanErrorMessage(err.message);
-        await logSystem('ROUTER', `Active key pool failover: ${keyObj.name} ❌ FAILED for ${modelName} (${cleanErr})`);
-        addTraceStep('ROUTER', 'failed', `Active Key ${keyObj.name} failed: ${cleanErr.substring(0, 50)}`);
       }
     }
   }
 
-  // 2. Try Backup Pool (Failover)
-  const backupKeys = keyHealth.backup.filter(k => {
-    const val = process.env[k.name];
-    return val && !val.startsWith('your_');
-  });
-
-  if (backupKeys.length > 0) {
-    for (let i = 0; i < backupKeys.length; i++) {
-      const currentIdx = (backupKeyIndex + i) % backupKeys.length;
-      const keyObj = backupKeys[currentIdx];
-      const apiKey = process.env[keyObj.name];
-
-      keyObj.lastUsed = Date.now();
-      try {
-        let result;
-        await logSystem('ROUTER', `Attempting backup key pool failover with key: ${keyObj.name}`);
-        addTraceStep('ROUTER', 'pending', `Using backup key pool: ${keyObj.name}`);
-        
-        try {
-          if (type === 'LIVE') {
-            result = await callGeminiLiveAPI(payloadData, systemInstruction, apiKey);
-          } else {
-            result = await callGeminiAPI(modelName, payloadData, systemInstruction, apiKey, grounding, jsonMode);
-          }
-        } catch (initialErr) {
-          const isFetchFailed = initialErr.message.toLowerCase().includes('fetch failed') || initialErr.message.toLowerCase().includes('socket');
-          if (isFetchFailed) {
-            await logSystem('ROUTER', `Fetch failed for backup ${keyObj.name}. Retrying once before failover...`);
-            if (type === 'LIVE') {
-              result = await callGeminiLiveAPI(payloadData, systemInstruction, apiKey);
-            } else {
-              result = await callGeminiAPI(modelName, payloadData, systemInstruction, apiKey, grounding, jsonMode);
-            }
-          } else {
-            throw initialErr;
-          }
-        }
-        keyObj.status = 'HEALTHY';
-        backupKeyIndex = (currentIdx + 1) % backupKeys.length;
-        return result;
-      } catch (err) {
-        keyObj.status = 'ERROR';
-        keyObj.errorCount++;
-        lastError = err;
-        const cleanErr = cleanErrorMessage(err.message);
-        await logSystem('ROUTER', `Backup key pool failover: ${keyObj.name} ❌ FAILED for ${modelName} (${cleanErr})`);
-        addTraceStep('ROUTER', 'failed', `Backup Key ${keyObj.name} failed: ${cleanErr.substring(0, 50)}`);
-      }
-    }
-  }
-
-  throw new Error(`All keys in Active and Backup pools failed. Last error: ${lastError?.message}`);
+  throw new Error(`All keys in Active and Backup pools failed for ${modelName}. Last error: ${lastError?.message}`);
 }
 
 /**
@@ -436,6 +416,7 @@ export async function generateText({ tier, prompt, systemInstruction = '', histo
           success = true;
         } else {
           // Run via Google API pool
+          // executeWithPool now handles its own internal retries and rotation
           if (model === 'gemini-3-flash-live') {
             result = await executeWithPool('LIVE', model, prompt, systemInstruction, grounding, jsonMode);
           } else {
@@ -448,6 +429,13 @@ export async function generateText({ tier, prompt, systemInstruction = '', histo
       } catch (err) {
         lastError = err;
         await logSystem('ROUTER', `Model ${model} attempt ${attempts}/${maxAttempts} failed: ${err.message}`);
+
+        // For Google models, if executeWithPool failed, it means all keys failed multiple times.
+        // We probably shouldn't retry the same model again in the outer loop if it's not an OpenRouter model.
+        if (!isOpenRouterModel) {
+          break; // Break the while loop and try next model in fallback chain
+        }
+
         if (attempts < maxAttempts) {
           await new Promise(resolve => setTimeout(resolve, 1000));
         }
