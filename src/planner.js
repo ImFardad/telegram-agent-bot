@@ -1,4 +1,4 @@
-import { logSystem, getUserProfile, getRecentMessages, createUserProfile, addMessageToBuffer } from './database.js';
+import { logSystem, getUserProfile, getRecentMessages, createUserProfile, addMessageToBuffer, getGroupVibe } from './database.js';
 import { generateText } from './router.js';
 import { startNewTrace, addTraceStep } from './trace.js';
 import * as tools from './tools.js';
@@ -36,6 +36,8 @@ Available Tools:
 - webSearch(query): Searches the web for information.
 - analyzeImage(fileId): Analyzes an image and gets its text/description.
 - followDiscussion(): Summarizes the last 100 messages in the group to catch up on the ongoing conversation. Call this tool when a user tags you and asks for your opinion on the recent discussion, or asks you to summarize what happened.
+- getSocialGraph(): Retrieves the mental graph of relationships between members in this group. Call this when you need to understand how people relate to each other.
+- getCollectiveMemory(): Recalls shared group events, jokes, and memories that everyone shared.
 
 Your output MUST be a valid JSON object. Do not include markdown codeblocks (like \`\`\`json) in your final reply. Output raw JSON only, matching this schema:
 {
@@ -99,7 +101,10 @@ export async function runPlanner(ctx, category) {
     content: `[${msg.user_fullname}]: ${msg.content}`
   }));
 
-  // 4. Compose current state for the Planner
+  // 4. Fetch group vibe
+  const groupVibe = await getGroupVibe(chatId);
+
+  // 5. Compose current state for the Planner
   const userFactSummary = profile ? JSON.stringify({
     name: profile.name,
     nicknames: profile.nicknames,
@@ -125,6 +130,7 @@ Incoming message details:
 - Message ID: ${message.message_id}
 - Message Content: "${messageText}"
 - Reply to Message: ${repliedMessageSummary}
+- Current Group Vibe: ${groupVibe}
 
 Sender Long-Term Memory Profile:
 ${userFactSummary}
@@ -206,6 +212,10 @@ Decide on should_respond, tool executions, and generation instructions. Respond 
           toolResult = await tools.webSearch(args[0]);
         } else if (toolName === 'followDiscussion') {
           toolResult = await tools.followDiscussion(chatId);
+        } else if (toolName === 'getSocialGraph') {
+          toolResult = await tools.getSocialGraph(chatId);
+        } else if (toolName === 'getCollectiveMemory') {
+          toolResult = await tools.getCollectiveMemory(chatId);
         } else if (toolName === 'analyzeImage') {
           const photoFileId = message.photo?.[message.photo.length - 1]?.file_id ||
                               (message.document && message.document.mime_type?.startsWith('image/') ? message.document.file_id : null) ||
@@ -253,11 +263,13 @@ Style Guidelines:
 - Tone: Friendly, conversational, dry-witted when appropriate, never robotic.
 - Format: Keep responses concise. Max 2 short paragraphs. Avoid excessive emojis (max 1 per message).
 - Identity: Speak directly as a long-term group member. Avoid generic greeting lines (like "Hello there, Fardad!").
+- Context Alignment: Align your response with the current group atmosphere/vibe.
 `;
 
     let synthesisPrompt = `
 You are replying to: "${messageText}" sent by ${fullName}.
 Sender Memory Profile: ${userFactSummary}
+Current Group Vibe: ${groupVibe}
 
 Instructions from Planner:
 ${generationInstructions}
