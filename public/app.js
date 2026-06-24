@@ -4,10 +4,16 @@ let userProfiles = [];
 let pollingInterval = null;
 let flowInterval = null;
 
+// Global Chart Instances
+let modelUsageChart = null;
+let activityChart = null;
+let socialNetwork = null;
+
 // Tab Routing titles
 const TAB_TITLES = {
   'tab-overview': { title: 'Dashboard Overview', subtitle: 'System metrics, real-time activity, and performance.' },
   'tab-memory': { title: 'Long-Term Memory Profiles', subtitle: 'Explore and manage cognitive profiles of group members.' },
+  'tab-intelligence': { title: 'Social Intelligence', subtitle: 'Analyze user relationships, group vibe, and collective memories.' },
   'tab-router': { title: 'Model Routing Registry', subtitle: 'Dynamic list of discovered free models from OpenRouter.' },
   'tab-dev': { title: 'Developer Control Console', subtitle: 'Execute manual model runs, verify API key pools, run observer digests, and trace active message flows.' }
 };
@@ -43,6 +49,10 @@ function setupNavigation() {
 
       // Load specific tab data
       if (activeTab === 'tab-memory') fetchUsers();
+      if (activeTab === 'tab-intelligence') {
+        fetchSocialGraph();
+        fetchSocialIntelligence();
+      }
       if (activeTab === 'tab-router') fetchModels();
       
       // Handle Developer Flow Polling
@@ -101,6 +111,7 @@ async function fetchStatusAndLogs() {
     if (usageRes.ok) {
       const usage = await usageRes.json();
       renderUsageTable(usage);
+      updateUsageCharts(usage);
     }
   } catch (error) {
     console.error('Error polling status/logs/usage:', error);
@@ -135,7 +146,9 @@ function updateMetricCards(stats) {
   document.getElementById('stat-uptime').textContent = uptimeString;
   document.getElementById('stat-messages').textContent = stats.total_messages_processed;
   document.getElementById('stat-memory').textContent = `${stats.memory_rss} MB`;
-  document.getElementById('stat-platform').textContent = stats.platform.toUpperCase();
+  if (stats.stats) {
+    document.getElementById('stat-users').textContent = stats.stats.total_users;
+  }
 }
 
 function renderLogs(logs) {
@@ -186,6 +199,97 @@ function renderUsageTable(usage) {
   }).join('');
 
   tableBody.innerHTML = html;
+}
+
+// ------------------------------------------------------------------------------
+// Charts (Overview)
+// ------------------------------------------------------------------------------
+
+function updateUsageCharts(usage) {
+  if (!usage || usage.length === 0) return;
+
+  // 1. Model Usage Pie Chart
+  const modelCounts = {};
+  usage.forEach(row => {
+    modelCounts[row.model_id] = (modelCounts[row.model_id] || 0) + row.request_count;
+  });
+
+  const modelLabels = Object.keys(modelCounts);
+  const modelData = Object.values(modelCounts);
+
+  const ctxModel = document.getElementById('modelUsageChart');
+  if (ctxModel) {
+    if (modelUsageChart) {
+      modelUsageChart.data.labels = modelLabels;
+      modelUsageChart.data.datasets[0].data = modelData;
+      modelUsageChart.update();
+    } else {
+      modelUsageChart = new Chart(ctxModel, {
+        type: 'doughnut',
+        data: {
+          labels: modelLabels,
+          datasets: [{
+            data: modelData,
+            backgroundColor: [
+              '#8a2be2', '#4169e1', '#2e8b57', '#d2691e', '#dc143c', '#00ffff'
+            ],
+            borderWidth: 0
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { position: 'right', labels: { color: '#cbd5e1', font: { family: 'Outfit' } } }
+          }
+        }
+      });
+    }
+  }
+
+  // 2. Activity Line Chart (Last 7 Days)
+  const dateCounts = {};
+  usage.forEach(row => {
+    dateCounts[row.usage_date] = (dateCounts[row.usage_date] || 0) + row.request_count;
+  });
+
+  const dates = Object.keys(dateCounts).sort().slice(-7);
+  const activityData = dates.map(d => dateCounts[d]);
+
+  const ctxActivity = document.getElementById('activityChart');
+  if (ctxActivity) {
+    if (activityChart) {
+      activityChart.data.labels = dates;
+      activityChart.data.datasets[0].data = activityData;
+      activityChart.update();
+    } else {
+      activityChart = new Chart(ctxActivity, {
+        type: 'line',
+        data: {
+          labels: dates,
+          datasets: [{
+            label: 'Requests',
+            data: activityData,
+            borderColor: '#8a2be2',
+            backgroundColor: 'rgba(138, 43, 226, 0.1)',
+            fill: true,
+            tension: 0.4
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          scales: {
+            y: { beginAtZero: true, grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#64748b' } },
+            x: { grid: { display: false }, ticks: { color: '#64748b' } }
+          },
+          plugins: {
+            legend: { display: false }
+          }
+        }
+      });
+    }
+  }
 }
 
 // ------------------------------------------------------------------------------
@@ -305,6 +409,90 @@ function renderModelsTable(models) {
 }
 
 // ------------------------------------------------------------------------------
+// Social Intelligence & Graph
+// ------------------------------------------------------------------------------
+
+async function fetchSocialGraph() {
+  const container = document.getElementById('social-graph-container');
+  if (!container) return;
+
+  try {
+    const res = await fetch('/api/social/graph');
+    const data = await res.json();
+    renderSocialGraph(data);
+  } catch (error) {
+    console.error('Failed to fetch social graph:', error);
+  }
+}
+
+function renderSocialGraph(data) {
+  const container = document.getElementById('social-graph-container');
+  const { links, users } = data;
+
+  const nodes = new vis.DataSet(users.map(u => ({
+    id: u.user_id,
+    label: u.name,
+    shape: 'circularImage',
+    image: `https://ui-avatars.com/api/?name=${encodeURIComponent(u.name)}&background=8a2be2&color=fff`,
+    color: { border: '#8a2be2', background: '#0f101d' },
+    font: { color: '#cbd5e1', face: 'Outfit' }
+  })));
+
+  const edges = new vis.DataSet(links.map(l => ({
+    from: l.user_a_id,
+    to: l.user_b_id,
+    label: l.relation_type,
+    font: { align: 'top', color: '#64748b', size: 10 },
+    color: { color: 'rgba(138, 43, 226, 0.3)', hover: '#8a2be2' }
+  })));
+
+  const options = {
+    nodes: { borderWidth: 2, size: 30 },
+    edges: { width: 2, selectionWidth: 4 },
+    physics: {
+      forceAtlas2Based: { gravitationalConstant: -50, centralGravity: 0.01, springLength: 100, springConstant: 0.08 },
+      maxVelocity: 50,
+      solver: 'forceAtlas2Based',
+      timestep: 0.35,
+      stabilization: { iterations: 150 }
+    },
+    interaction: { hover: true, tooltipDelay: 200 }
+  };
+
+  if (socialNetwork) socialNetwork.destroy();
+  socialNetwork = new vis.Network(container, { nodes, edges }, options);
+}
+
+async function fetchSocialIntelligence() {
+  try {
+    const res = await fetch('/api/social/intelligence');
+    const data = await res.json();
+    renderSocialIntelligence(data);
+  } catch (error) {
+    console.error('Failed to fetch social intelligence:', error);
+  }
+}
+
+function renderSocialIntelligence(data) {
+  const vibeVal = document.querySelector('.vibe-value');
+  const vibeMeta = document.querySelector('.vibe-meta');
+  const memoriesList = document.getElementById('collective-memories-list');
+
+  if (vibeVal) vibeVal.textContent = data.vibe || 'Neutral';
+  if (vibeMeta) vibeMeta.textContent = `Last analyzed: ${new Date().toLocaleTimeString()}`;
+
+  if (memoriesList) {
+    if (!data.memories || data.memories.length === 0) {
+      memoriesList.innerHTML = '<li class="empty-list">No collective memories recorded yet.</li>';
+    } else {
+      memoriesList.innerHTML = data.memories.map(m => `
+        <li>${escapeHTML(m.event_description)}</li>
+      `).join('');
+    }
+  }
+}
+
+// ------------------------------------------------------------------------------
 // Action Listeners
 // ------------------------------------------------------------------------------
 function setupActionListeners() {
@@ -327,6 +515,12 @@ function setupActionListeners() {
   const btnRefreshUsage = document.getElementById('btn-refresh-usage');
   if (btnRefreshUsage) {
     btnRefreshUsage.addEventListener('click', fetchStatusAndLogs);
+  }
+
+  // Refresh Graph Button
+  const btnRefreshGraph = document.getElementById('btn-refresh-graph');
+  if (btnRefreshGraph) {
+    btnRefreshGraph.addEventListener('click', fetchSocialGraph);
   }
 
   // Trigger Model Scan Button
