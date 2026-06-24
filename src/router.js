@@ -28,11 +28,84 @@ function isQuotaError(err) {
   return msg.includes('429') || msg.includes('quota') || msg.includes('rate limit');
 }
 
+// Throttling state
+let nextAllowedCallTimestamp = 0;
+const API_GAP_MS = 10000;
+
+/**
+ * Ensures there is at least a 10-second gap between API calls.
+ * Even if multiple calls are made in parallel, they will be queued 10s apart.
+ */
+async function ensureApiGap() {
+  const now = Date.now();
+
+  if (nextAllowedCallTimestamp < now) {
+    nextAllowedCallTimestamp = now;
+  }
+
+  const waitTime = nextAllowedCallTimestamp - now;
+  nextAllowedCallTimestamp += API_GAP_MS;
+
+  if (waitTime > 0) {
+    await new Promise(resolve => setTimeout(resolve, waitTime));
+  }
+}
+
+// Gemma Priority & Stickiness state
+const GEMMA_MODELS = {
+  P31: 'gemma-4-31b-it',
+  P26: 'gemma-4-26b-a4b-it'
+};
+
+const gemmaState = {
+  preferredModel: null,
+  expiresAt: 0,
+  testMode: false,
+  nextTestTime: 0
+};
+
+function getGemmaModelsToTry() {
+  const now = Date.now();
+  if (gemmaState.testMode) {
+    if (now < gemmaState.nextTestTime) return [];
+    return [GEMMA_MODELS.P31, GEMMA_MODELS.P26];
+  }
+  if (gemmaState.preferredModel && now < gemmaState.expiresAt) {
+    return [gemmaState.preferredModel];
+  }
+  return [GEMMA_MODELS.P31, GEMMA_MODELS.P26];
+}
+
+function updateGemmaState(modelUsed, success) {
+  const now = Date.now();
+  const isGemmaModel = Object.values(GEMMA_MODELS).includes(modelUsed);
+  if (!isGemmaModel) return;
+
+  if (success) {
+    gemmaState.preferredModel = modelUsed;
+    gemmaState.expiresAt = now + (8 * 60 * 60 * 1000);
+    gemmaState.testMode = false;
+    gemmaState.nextTestTime = 0;
+  } else if (gemmaState.preferredModel === modelUsed) {
+    gemmaState.preferredModel = null;
+    gemmaState.expiresAt = 0;
+  }
+}
+
+function enterGemmaTestMode() {
+  if (gemmaState.testMode) return;
+  gemmaState.testMode = true;
+  gemmaState.nextTestTime = Date.now() + (30 * 60 * 1000);
+  gemmaState.preferredModel = null;
+  gemmaState.expiresAt = 0;
+  logSystem('ROUTER', 'Both Gemma models failed. Entering Test Mode (30m cooldown).');
+}
+
 // Fallback chains for different tiers
 const FALLBACK_CHAINS = {
-  GEMMA_PLANNER: ['gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemini-3.1-flash-lite'],
-  GEMMA: ['gemma-4-26b-a4b-it', 'gemma-4-31b-it', 'gemini-3.1-flash-lite'],
-  LITE: ['gemini-3.1-flash-lite', 'gemma-4-31b-it', 'gemma-4-26b-a4b-it', 'gemma-4-31b-it'],
+  GEMMA_PLANNER: ['GEMMA_DYNAMIC', 'gemini-3.1-flash-lite'],
+  GEMMA: ['GEMMA_DYNAMIC', 'gemini-3.1-flash-lite'],
+  LITE: ['gemini-3.1-flash-lite', 'gemma-4-31b-it', 'gemma-4-26b-a4b-it'],
   FLASH: ['gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemma-4-31b-it', 'gemini-3-flash', 'gemini-2.5-flash'],
   LIVE_DIGEST: ['gemini-3-flash-live']
 };
@@ -82,6 +155,7 @@ export function getKeyStatus() {
  * Call Gemini API using a specific model and key
  */
 async function callGeminiAPI(modelName, contents, systemInstruction = '', apiKey, grounding = null, jsonMode = false) {
+  await ensureApiGap();
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${apiKey}`;
   
   const payload = {
@@ -147,6 +221,7 @@ async function callGeminiLiveAPI(prompt, systemInstruction = '', apiKey) {
     throw new Error('WebSocket is not defined. Please run Node.js with --experimental-websocket flag.');
   }
 
+  await ensureApiGap();
   const modelName = 'models/gemini-3-flash-live';
   const url = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContent?key=${apiKey}`;
   
@@ -326,6 +401,7 @@ async function executeWithPool(type, modelName, payloadData, systemInstruction =
  * Call OpenRouter API directly
  */
 async function callOpenRouterAPI(modelName, messages, apiKey) {
+  await ensureApiGap();
   const url = 'https://openrouter.ai/api/v1/chat/completions';
   
   const payload = {
@@ -359,7 +435,17 @@ async function callOpenRouterAPI(modelName, messages, apiKey) {
  */
 export async function generateText({ tier, prompt, systemInstruction = '', history = [], forceModel = null, grounding = null, jsonMode = false, contents = null }) {
   // If forceModel is specified, we bypass fallback chains and call it directly
-  const modelsToTry = forceModel ? [forceModel] : (FALLBACK_CHAINS[tier] || FALLBACK_CHAINS.LITE);
+  let modelsToTry = forceModel ? [forceModel] : [...(FALLBACK_CHAINS[tier] || FALLBACK_CHAINS.LITE)];
+
+  if (modelsToTry.includes('GEMMA_DYNAMIC')) {
+    const dynamicModels = getGemmaModelsToTry();
+    const index = modelsToTry.indexOf('GEMMA_DYNAMIC');
+    if (dynamicModels.length > 0) {
+      modelsToTry.splice(index, 1, ...dynamicModels);
+    } else {
+      modelsToTry.splice(index, 1);
+    }
+  }
   
   addTraceStep('ROUTER', 'pending', `Starting routing for tier: ${tier || 'LITE'} (Options: ${modelsToTry.join(', ')})`);
 
@@ -424,6 +510,7 @@ export async function generateText({ tier, prompt, systemInstruction = '', histo
           }
           addTraceStep('ROUTER', 'success', `Successfully generated text via Gemini: ${model}`);
           await incrementModelUsage(model);
+          updateGemmaState(model, true);
           success = true;
         }
       } catch (err) {
@@ -445,8 +532,15 @@ export async function generateText({ tier, prompt, systemInstruction = '', histo
     if (success) {
       return result;
     } else {
+      updateGemmaState(model, false);
       await logSystem('ROUTER', `Model ${model} in tier ${tier} failed all ${maxAttempts} attempts. Trying next fallback.`);
       addTraceStep('ROUTER', 'failed', `Model ${model} failed all ${maxAttempts} attempts: ${lastError.message.substring(0, 50)}...`);
+    }
+  }
+
+  if ((tier === 'GEMMA_PLANNER' || tier === 'GEMMA') && !success) {
+    if (modelsToTry.some(m => Object.values(GEMMA_MODELS).includes(m))) {
+      enterGemmaTestMode();
     }
   }
 
@@ -500,20 +594,19 @@ export async function checkKeysHealthOnStartup() {
     }
 
     try {
-      // Test the key using gemma-4-31b-it as a cheap test request
       await callGeminiAPI(
-        'gemma-4-31b-it',
+        'gemini-3.1-flash-lite',
         [{ role: 'user', parts: [{ text: 'Ping' }] }],
         '',
         keyVal
       );
       keyObj.status = 'HEALTHY';
-      await logSystem('ROUTER', `Startup key check: ${keyObj.name} is HEALTHY ✅ (via Gemma 4 31B)`);
+      await logSystem('ROUTER', `Startup key check: ${keyObj.name} is HEALTHY ✅ (via Gemini 3.1 Flash Lite)`);
     } catch (err) {
       const cleanErr = cleanErrorMessage(err.message);
       keyObj.status = 'ERROR';
       keyObj.errorCount++;
-      await logSystem('ROUTER', `Startup key check: ${keyObj.name} ❌ FAILED (Gemma 4 31B: ${cleanErr})`);
+      await logSystem('ROUTER', `Startup key check: ${keyObj.name} ❌ FAILED (Gemini 3.1 Flash Lite: ${cleanErr})`);
     }
   };
 
@@ -522,19 +615,14 @@ export async function checkKeysHealthOnStartup() {
   await Promise.all(allKeys.map(k => testKey(k)));
   await logSystem('ROUTER', 'Google API keys health check completed.');
 
-  // Select first healthy key and run a real test text generation
   const healthyKeys = allKeys.filter(k => k.status === 'HEALTHY');
   if (healthyKeys.length > 0) {
-    const testKeyObj = healthyKeys[0];
-    const apiKey = process.env[testKeyObj.name];
     try {
-      await logSystem('ROUTER', `Running a live test message using healthy key: ${testKeyObj.name}...`);
-      const response = await callGeminiAPI(
-        'gemma-4-31b-it',
-        [{ role: 'user', parts: [{ text: "Respond with exactly: 'Hello Fardad! API test successful'" }] }],
-        '',
-        apiKey
-      );
+      await logSystem('ROUTER', `Running a live test message using generateText (tier: GEMMA_PLANNER)...`);
+      const response = await generateText({
+        tier: 'GEMMA_PLANNER',
+        prompt: "Respond with exactly: 'Hello Fardad! API test successful'"
+      });
       await logSystem('ROUTER', `API Live Test Response: "${response.trim()}"`);
     } catch (testErr) {
       const cleanErr = cleanErrorMessage(testErr.message);
