@@ -14,7 +14,11 @@ import {
   getRegisteredModels,
   addMessageToBuffer,
   getRecentMessageCount,
-  getModelUsageStats
+  getModelUsageStats,
+  getSocialLinks,
+  getGroupVibe,
+  getCollectiveMemories,
+  getCollectiveMemoryCount
 } from './src/database.js';
 import { classifyMessage } from './src/classifier.js';
 import { runPlanner } from './src/planner.js';
@@ -250,6 +254,12 @@ function setupBotHandlers() {
 app.get('/api/status', async (req, res) => {
   try {
     const memory = process.memoryUsage();
+    const users = await getAllUserProfiles();
+    const models = await getRegisteredModels();
+    const chatId = Number(process.env.ALLOWED_CHAT_ID);
+    const links = await getSocialLinks(chatId);
+    const totalMemories = await getCollectiveMemoryCount(chatId);
+
     res.json({
       status: botStatus,
       uptime: Math.floor(process.uptime()),
@@ -259,8 +269,42 @@ app.get('/api/status', async (req, res) => {
       cpu_cores: os.cpus().length,
       platform: os.platform(),
       total_messages_processed: totalMessagesProcessed,
-      bot_configured: !!bot
+      bot_configured: !!bot,
+      stats: {
+        total_users: users.length,
+        total_models: models.length,
+        total_links: links.length,
+        total_memories: totalMemories
+      }
     });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ------------------------------------------------------------------------------
+// Social & Collective Intelligence Endpoints
+// ------------------------------------------------------------------------------
+
+// 6.1 Get Social Graph
+app.get('/api/social/graph', async (req, res) => {
+  try {
+    const chatId = Number(process.env.ALLOWED_CHAT_ID);
+    const links = await getSocialLinks(chatId);
+    const users = await getAllUserProfiles();
+    res.json({ links, users });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// 6.2 Get Collective Intelligence (Vibe & Memories)
+app.get('/api/social/intelligence', async (req, res) => {
+  try {
+    const chatId = Number(process.env.ALLOWED_CHAT_ID);
+    const vibe = await getGroupVibe(chatId);
+    const memories = await getCollectiveMemories(chatId, 20);
+    res.json({ vibe, memories });
   } catch (error) {
     res.status(500).json({ error: error.message });
   }

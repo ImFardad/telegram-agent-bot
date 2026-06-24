@@ -12,6 +12,9 @@
   <link href="https://cdn.jsdelivr.net/npm/remixicon@4.2.0/fonts/remixicon.css" rel="stylesheet"/>
   <!-- Custom CSS -->
   <link rel="stylesheet" href="style.css">
+  <!-- Chart.js and Vis.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
 </head>
 <body>
 
@@ -33,6 +36,10 @@
         <button class="nav-item" data-tab="tab-memory">
           <i class="ri-brain-line"></i>
           <span>Long Memory</span>
+        </button>
+        <button class="nav-item" data-tab="tab-intelligence">
+          <i class="ri-bubble-chart-line"></i>
+          <span>Social Intelligence</span>
         </button>
         <button class="nav-item" data-tab="tab-router">
           <i class="ri-route-line"></i>
@@ -103,11 +110,31 @@
 
           <div class="metric-card">
             <div class="metric-icon bg-orange">
-              <i class="ri-server-line"></i>
+              <i class="ri-group-line"></i>
             </div>
             <div class="metric-data">
-              <span class="metric-label">Platform Host</span>
-              <h3 class="metric-value" id="stat-platform">Linux</h3>
+              <span class="metric-label">Active Users</span>
+              <h3 class="metric-value" id="stat-users">0</h3>
+            </div>
+          </div>
+        </div>
+
+        <!-- Charts Row -->
+        <div class="charts-row">
+          <div class="chart-container">
+            <div class="section-header">
+              <h2><i class="ri-bar-chart-line"></i> Model Usage Distribution</h2>
+            </div>
+            <div class="chart-wrapper">
+              <canvas id="modelUsageChart"></canvas>
+            </div>
+          </div>
+          <div class="chart-container">
+            <div class="section-header">
+              <h2><i class="ri-line-chart-line"></i> Message Activity</h2>
+            </div>
+            <div class="chart-wrapper">
+              <canvas id="activityChart"></canvas>
             </div>
           </div>
         </div>
@@ -175,6 +202,45 @@
         <div class="user-cards-grid" id="user-cards-container">
           <!-- Dynamically populated user profiles -->
           <div class="card-loader">Loading user memories...</div>
+        </div>
+      </section>
+
+      <!-- TAB: SOCIAL INTELLIGENCE -->
+      <section id="tab-intelligence" class="tab-pane">
+        <div class="intelligence-grid">
+          <!-- Social Graph Section -->
+          <div class="dev-card graph-card">
+            <div class="dev-card-header">
+              <h2><i class="ri-share-line"></i> Social Network Graph</h2>
+              <button class="btn btn-primary btn-sm" id="btn-refresh-graph">
+                <i class="ri-refresh-line"></i> Refresh Graph
+              </button>
+            </div>
+            <div id="social-graph-container"></div>
+          </div>
+
+          <div class="intelligence-side-panel">
+            <!-- Group Vibe Card -->
+            <div class="dev-card vibe-card">
+              <div class="dev-card-header">
+                <h2><i class="ri-pulse-line"></i> Group Vibe</h2>
+              </div>
+              <div id="group-vibe-display" class="vibe-display">
+                <div class="vibe-value">Neutral</div>
+                <div class="vibe-meta">Last analyzed: Never</div>
+              </div>
+            </div>
+
+            <!-- Collective Memory Card -->
+            <div class="dev-card memories-card">
+              <div class="dev-card-header">
+                <h2><i class="ri-history-line"></i> Collective Memories</h2>
+              </div>
+              <ul id="collective-memories-list" class="memories-list">
+                <li class="empty-list">No collective memories recorded yet.</li>
+              </ul>
+            </div>
+          </div>
         </div>
       </section>
 

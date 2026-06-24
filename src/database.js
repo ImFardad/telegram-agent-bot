@@ -357,6 +357,12 @@ export async function getCollectiveMemories(chatId, limit = 10) {
   );
 }
 
+export async function getCollectiveMemoryCount(chatId) {
+  if (!db) return 0;
+  const row = await db.get('SELECT COUNT(*) as cnt FROM collective_memory WHERE chat_id = ?', [chatId]);
+  return row ? row.cnt : 0;
+}
+
 // Social Links (Relational Graph) Helpers
 export async function updateSocialLink(chatId, userAId, userBId, type, description) {
   if (!db) return;
