@@ -7,6 +7,8 @@ A persistent social agent that lives inside a private Telegram group. It maintai
 ## 🚀 Key Features
 
 * **LLM-Independent Identity**: Core behavior and planning are directed by **Gemma 31B** (Identity/Planner Brain), while casual text generation is delegated to lighter worker models (e.g. **Gemini 3.1 Flash Lite**), preserving personality.
+* **Relational & Collective Memory**: Maintains a social graph of user interactions and a shared group history of events and inside jokes, stored in SQLite and accessed on-demand.
+* **Group Vibe Analysis**: Uses Gemma to periodically analyze the group atmosphere (mood, tension, energy) and aligns its response tone accordingly.
 * **Frosted Glassmorphic Web Dashboard**: Real-time stats, resource allocation tracker, SQLite user memory card explorer, and OpenRouter model routing manager.
 * **Auto-Discovery Worker**: Periodically sweeps OpenRouter for active free models, benchmarks latency and tool-calling capabilities, and ranks them in the registry.
 * **Continuous Observation Mode**: Switches to a high-frequency Gemini Live streaming listener if chat volume spikes (>100 messages within 10 minutes) to digest context in the background.
